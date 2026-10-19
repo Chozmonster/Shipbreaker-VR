@@ -8,7 +8,7 @@ Fork of [Raicuparta/shipbreaker-vr](https://github.com/Raicuparta/shipbreaker-vr
 
 - Auto-enter VR on launch (no F3 required; F3 remains a debug toggle)
 - World-space menus + gaze laser so main menu → Free Play works in-headset
-- Simple zip / Mod-folder install drop
+- Simple zip install drop (flat root — extract into game folder; no `Mod\` wrapper)
 
 Motion controls (grab / cut / throw) are **not** done yet.
 
@@ -21,8 +21,8 @@ Motion controls (grab / cut / throw) are **not** done yet.
 
 Output:
 
-- `dist/Mod/` — copy into the Steam Shipbreaker folder
-- `dist/ShipbreakerVR-0.4.0-jay.zip` — same contents zipped
+- `dist/ShipbreakerVR-<ver>-jay.zip` — **flat root** (`winhttp.dll`, `BepInEx\`, …); extract into Steam Shipbreaker folder
+- `dist/staging/` / `dist/Mod/` — local inspect copies of the same files
 
 Vendored XR managed refs live under `ShipbreakerVrUnity/Build/.../Managed/` (built from Unity package sources for CI). Native OpenXR binaries ship via `ShipbreakerVrPatcher/CopyToGame`.
 

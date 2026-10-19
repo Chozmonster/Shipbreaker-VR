@@ -1,74 +1,79 @@
 #!/usr/bin/env bash
-# Build an installable ShipbreakerVR drop for Jay (zip + Mod/ folder).
+# Build an installable ShipbreakerVR drop for Jay.
+# Zip root is FLAT (no Mod/ wrapper): winhttp.dll, doorstop_config.ini, BepInEx/, …
+# Jay extracts the zip directly into the Steam Shipbreaker folder.
 # CRITICAL: doorstop (winhttp.dll) must sit next to Shipbreaker.exe — NOT under CopyToGame/.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="${HOME}/.dotnet:${PATH}"
-PUBLISH_DIR="${ROOT}/dist/Mod"
+# Staging folder only (not what Jay sees in the zip).
+STAGING_DIR="${ROOT}/dist/staging"
 DROP_DIR="${ROOT}/dist"
 VERSION="${VERSION:-0.4.5}"
 ZIP_NAME="ShipbreakerVR-${VERSION}-jay.zip"
 
-echo "==> Cleaning ${PUBLISH_DIR}"
-rm -rf "${PUBLISH_DIR}"
-mkdir -p "${PUBLISH_DIR}"
+echo "==> Cleaning ${STAGING_DIR}"
+rm -rf "${STAGING_DIR}"
+mkdir -p "${STAGING_DIR}"
 
-echo "==> Building plugin + patcher → ${PUBLISH_DIR}"
-dotnet build "${ROOT}/ShipbreakerVr.sln" -c Release -p:PublishDir="${PUBLISH_DIR}/"
+echo "==> Building plugin + patcher → ${STAGING_DIR}"
+dotnet build "${ROOT}/ShipbreakerVr.sln" -c Release -p:PublishDir="${STAGING_DIR}/"
 
-if [[ ! -f "${PUBLISH_DIR}/BepInEx/plugins/ShipbreakerVr/ShipbreakerVr.dll" ]]; then
+if [[ ! -f "${STAGING_DIR}/BepInEx/plugins/ShipbreakerVr/ShipbreakerVr.dll" ]]; then
   echo "ERROR: plugin DLL missing after build" >&2
   exit 1
 fi
 
 # ---------------------------------------------------------------------------
-# Flatten ModFiles/CopyToGame → Mod root
+# Flatten ModFiles/CopyToGame → staging root
 # RaiManager reads a CopyToGame folder; manual zip install must put doorstop
 # next to Shipbreaker.exe. Without this, SteamVR shows flat theater mode
 # because BepInEx never loads.
 # ---------------------------------------------------------------------------
-if [[ -d "${PUBLISH_DIR}/CopyToGame" ]]; then
-  echo "==> Flattening CopyToGame → Mod root (doorstop next to game exe)"
-  cp -a "${PUBLISH_DIR}/CopyToGame/." "${PUBLISH_DIR}/"
-  rm -rf "${PUBLISH_DIR}/CopyToGame"
+if [[ -d "${STAGING_DIR}/CopyToGame" ]]; then
+  echo "==> Flattening CopyToGame → staging root (doorstop next to game exe)"
+  cp -a "${STAGING_DIR}/CopyToGame/." "${STAGING_DIR}/"
+  rm -rf "${STAGING_DIR}/CopyToGame"
 fi
 
 # Also pre-stage OpenXR native binaries into the game-relative paths so the
 # first launch does not depend solely on the BepInEx patcher copy step.
-PATCHER_COPY="${PUBLISH_DIR}/BepInEx/patchers/ShipbreakerVrPatcher/CopyToGame"
+PATCHER_COPY="${STAGING_DIR}/BepInEx/patchers/ShipbreakerVrPatcher/CopyToGame"
 if [[ -d "${PATCHER_COPY}" ]]; then
-  echo "==> Pre-staging OpenXR native files into Mod root"
-  cp -a "${PATCHER_COPY}/." "${PUBLISH_DIR}/"
+  echo "==> Pre-staging OpenXR native files into staging root"
+  cp -a "${PATCHER_COPY}/." "${STAGING_DIR}/"
 fi
 
-if [[ ! -f "${PUBLISH_DIR}/winhttp.dll" || ! -f "${PUBLISH_DIR}/doorstop_config.ini" ]]; then
-  echo "ERROR: doorstop files missing at Mod root (winhttp.dll / doorstop_config.ini)" >&2
+if [[ ! -f "${STAGING_DIR}/winhttp.dll" || ! -f "${STAGING_DIR}/doorstop_config.ini" ]]; then
+  echo "ERROR: doorstop files missing at staging root (winhttp.dll / doorstop_config.ini)" >&2
   exit 1
 fi
 
-if [[ ! -f "${PUBLISH_DIR}/Shipbreaker_Data/Plugins/x86_64/UnityOpenXR.dll" ]]; then
-  echo "ERROR: UnityOpenXR.dll missing under Mod/Shipbreaker_Data/Plugins/x86_64/" >&2
+if [[ ! -f "${STAGING_DIR}/Shipbreaker_Data/Plugins/x86_64/UnityOpenXR.dll" ]]; then
+  echo "ERROR: UnityOpenXR.dll missing under Shipbreaker_Data/Plugins/x86_64/" >&2
   exit 1
 fi
 
 # Install helper for manual installs (no RaiManager required)
-cat > "${PUBLISH_DIR}/INSTALL.txt" << EOF
+cat > "${STAGING_DIR}/INSTALL.txt" << EOF
 ShipbreakerVR ${VERSION} (Chozmonster fork)
 ========================================
 
-This folder is a complete mod drop. You do NOT need the itch.io ShipbreakerVR download.
+This zip has a FLAT root (no Mod\\ folder). Extract directly into your
+Steam Shipbreaker folder. You do NOT need the itch.io ShipbreakerVR download.
 
 Quick install (Steam):
 1. Close Hardspace: Shipbreaker.
-2. Copy EVERYTHING in this Mod folder into your Shipbreaker game folder
+2. Extract this zip INTO your Shipbreaker game folder
    (the folder that contains Shipbreaker.exe), merging folders when asked.
    Typical Steam path:
    C:\\Program Files (x86)\\Steam\\steamapps\\common\\Hardspace Shipbreaker\\
-3. VERIFY after copy (this is the #1 theater-mode cause if wrong):
+3. VERIFY after extract (this is the #1 theater-mode cause if wrong):
      - winhttp.dll          MUST sit next to Shipbreaker.exe
      - doorstop_config.ini  MUST sit next to Shipbreaker.exe
      - BepInEx\\plugins\\ShipbreakerVr\\ShipbreakerVr.dll exists
+   If you see a Mod\\ folder, open it and move its contents up next to the exe.
    If winhttp.dll is inside a CopyToGame folder, move it up next to the exe.
 4. Boot order (SteamVR-first / VD / ALVR):
      a) Start Virtual Desktop or ALVR and put headset on
@@ -86,8 +91,8 @@ Debug keys: F3 = VR toggle, F5 = potato quality, F6 = toggle lights
 Logs: BepInEx\\LogOutput.log
 EOF
 
-if [[ -f "${PUBLISH_DIR}/manifest.json" ]]; then
-  python3 - <<'PY' "${PUBLISH_DIR}/manifest.json" "${VERSION}"
+if [[ -f "${STAGING_DIR}/manifest.json" ]]; then
+  python3 - <<'PY' "${STAGING_DIR}/manifest.json" "${VERSION}"
 import json, sys
 path, ver = sys.argv[1], sys.argv[2]
 with open(path) as f:
@@ -100,8 +105,8 @@ with open(path, "w") as f:
 PY
 fi
 
-echo "==> Verifying drop layout"
-python3 - <<'PY' "${PUBLISH_DIR}"
+echo "==> Verifying staging layout"
+python3 - <<'PY' "${STAGING_DIR}"
 import os, sys
 root = sys.argv[1]
 required = [
@@ -119,7 +124,6 @@ for rel in required:
     ok = os.path.isfile(path)
     print(("OK  " if ok else "MISS") + " " + rel)
     bad = bad or not ok
-# Fail if leftover CopyToGame at root with doorstop (wrong layout)
 wrong = os.path.join(root, "CopyToGame", "winhttp.dll")
 if os.path.isfile(wrong):
     print("MISS winhttp.dll must NOT only live under CopyToGame/")
@@ -127,20 +131,48 @@ if os.path.isfile(wrong):
 sys.exit(1 if bad else 0)
 PY
 
-echo "==> Zipping → ${DROP_DIR}/${ZIP_NAME}"
+echo "==> Zipping FLAT root → ${DROP_DIR}/${ZIP_NAME}"
 mkdir -p "${DROP_DIR}"
 rm -f "${DROP_DIR}/${ZIP_NAME}"
-( cd "${DROP_DIR}" && zip -r "${ZIP_NAME}" Mod >/dev/null )
+# Zip contents of staging at archive root — NO Mod/ wrapper (Jay preference).
+( cd "${STAGING_DIR}" && zip -r "${DROP_DIR}/${ZIP_NAME}" . >/dev/null )
+
+echo "==> Verifying zip has flat root (winhttp.dll at top level, no Mod/)"
+python3 - <<'PY' "${DROP_DIR}/${ZIP_NAME}"
+import sys, zipfile
+zpath = sys.argv[1]
+with zipfile.ZipFile(zpath) as z:
+    names = z.namelist()
+bad = False
+# Accept ./winhttp.dll or winhttp.dll
+has_doorstop = any(n.replace("\\", "/").lstrip("./") == "winhttp.dll" for n in names)
+has_mod_wrapper = any(
+    n.replace("\\", "/").startswith("Mod/") or n.replace("\\", "/") == "Mod/"
+    for n in names
+)
+print(("OK  " if has_doorstop else "MISS") + " zip root contains winhttp.dll")
+print(("OK  " if not has_mod_wrapper else "MISS") + " zip has NO Mod/ wrapper")
+if not has_doorstop or has_mod_wrapper:
+    print("Sample entries:", names[:12])
+    sys.exit(1)
+# Show a few top-level entries
+tops = sorted({n.replace("\\", "/").lstrip("./").split("/")[0] for n in names if n.strip("./")})
+print("Top-level entries:", ", ".join(tops[:20]))
+PY
 
 STORE_ART="/cursor/stores/bc-581a98f7-6064-4a97-99b0-9c1bcd6d7f2f/artifacts"
 if [[ -d "/cursor/stores/bc-581a98f7-6064-4a97-99b0-9c1bcd6d7f2f" ]]; then
   mkdir -p "${STORE_ART}"
   cp -f "${DROP_DIR}/${ZIP_NAME}" "${STORE_ART}/"
-  # Keep a pointer for the previous broken drop name so we don't confuse Jay
   echo "==> Copied zip to ${STORE_ART}/${ZIP_NAME}"
 fi
 
-echo "==> Done"
+# Keep dist/Mod as a convenience symlink/copy for local inspect (optional)
+rm -rf "${DROP_DIR}/Mod"
+mkdir -p "${DROP_DIR}/Mod"
+cp -a "${STAGING_DIR}/." "${DROP_DIR}/Mod/"
+
+echo "==> Done (flat-root zip)"
 ls -lh "${DROP_DIR}/${ZIP_NAME}"
-echo "Doorstop at Mod root:"
-ls -lh "${PUBLISH_DIR}/winhttp.dll" "${PUBLISH_DIR}/doorstop_config.ini"
+echo "Doorstop at staging root:"
+ls -lh "${STAGING_DIR}/winhttp.dll" "${STAGING_DIR}/doorstop_config.ini"
