@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="${HOME}/.dotnet:${PATH}"
 PUBLISH_DIR="${ROOT}/dist/Mod"
 DROP_DIR="${ROOT}/dist"
-VERSION="${VERSION:-0.4.2}"
+VERSION="${VERSION:-0.4.3}"
 ZIP_NAME="ShipbreakerVR-${VERSION}-jay.zip"
 
 echo "==> Cleaning ${PUBLISH_DIR}"

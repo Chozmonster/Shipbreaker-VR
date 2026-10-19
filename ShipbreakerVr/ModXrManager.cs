@@ -194,6 +194,8 @@ public class ModXrManager : MonoBehaviour
             if (!IsVrEnabled)
                 return "OpenXR loader started but isInitialized/display subsystem still false.";
 
+            // Re-anchor any already-converted menus in front of the player (world-locked).
+            RecenterAllVrUi();
             return null;
         }
         catch (Exception e)
@@ -293,6 +295,19 @@ public class ModXrManager : MonoBehaviour
         catch (Exception e)
         {
             Debug.LogWarning($"[ShipbreakerVr] LogXrStatus failed: {e.Message}");
+        }
+    }
+
+    private static void RecenterAllVrUi()
+    {
+        try
+        {
+            foreach (var ui in FindObjectsOfType<VrUi>())
+                ui.PlaceInFrontOfPlayer(force: true);
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning($"[ShipbreakerVr] RecenterAllVrUi: {e.Message}");
         }
     }
 }
