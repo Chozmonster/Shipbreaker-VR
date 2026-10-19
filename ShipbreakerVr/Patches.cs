@@ -7,10 +7,6 @@ namespace ShipbreakerVr;
 [HarmonyPatch]
 public static class Patches
 {
-    // HarmonyX injects the patched object as __instance (double underscore).
-    // A bare "instance" param is treated as a real method argument and fails on
-    // parameterless Start()/OnEnable() — which left VR camera unhooked (theater mode).
-
     [HarmonyPostfix]
     [HarmonyPatch(typeof(LynxCameraController), nameof(LynxCameraController.Start))]
     private static void CreateVrCamera(LynxCameraController __instance)
@@ -18,22 +14,37 @@ public static class Patches
         var camera = __instance.GetComponent<Camera>();
         if (!camera)
         {
-            Debug.LogError("[ShipbreakerVr] Couldn't find Main Camera in LynxCameraController");
+            ModLog.Error("[VrCamera] Couldn't find Main Camera on LynxCameraController");
             return;
         }
 
         VrCamera.Create(camera);
-        Debug.Log("[ShipbreakerVr] VrCamera hooked on LynxCameraController.Start");
+        ModLog.Info("[VrCamera] hooked on LynxCameraController.Start");
+    }
+
+    /// <summary>
+    /// Still observe CanvasScaler enables for diagnostics. Actual world-lock is
+    /// performed by VrMenuWorldLock scanning all root canvases (Doozy menus may
+    /// not go through this path alone).
+    /// </summary>
+    [HarmonyPostfix]
+    [HarmonyPatch(typeof(CanvasScaler), "OnEnable")]
+    private static void ObserveCanvasScaler(CanvasScaler __instance)
+    {
+        var canvas = __instance.GetComponent<Canvas>();
+        if (!canvas || !canvas.isRootCanvas) return;
+        ModLog.Info(
+            $"[WorldLock][Menu] CanvasScaler.OnEnable on '{canvas.name}' mode={canvas.renderMode} " +
+            $"(scanner will world-lock if VR on)");
     }
 
     [HarmonyPostfix]
-    [HarmonyPatch(typeof(CanvasScaler), "OnEnable")]
-    private static void MoveCanvasesToWorldSpace(CanvasScaler __instance)
+    [HarmonyPatch(typeof(Canvas), "OnEnable")]
+    private static void ObserveCanvas(Canvas __instance)
     {
-        var canvas = __instance.GetComponent<Canvas>();
-
-        if (!canvas.isRootCanvas || canvas.renderMode == RenderMode.WorldSpace) return;
-
-        canvas.gameObject.AddComponent<VrUi>();
+        if (!__instance || !__instance.isRootCanvas) return;
+        ModLog.Info(
+            $"[WorldLock][Menu] Canvas.OnEnable '{__instance.name}' mode={__instance.renderMode} " +
+            $"camera={( __instance.worldCamera ? __instance.worldCamera.name : "null")}");
     }
 }

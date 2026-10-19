@@ -61,7 +61,7 @@ public class ModXrManager : MonoBehaviour
 
     private void Start()
     {
-        Debug.Log("[ShipbreakerVr] ModXrManager started. AutoEnterVr=" +
+        ModLog.Info("[XR] ModXrManager started. AutoEnterVr=" +
                   (autoEnterVr != null && autoEnterVr.Value));
         if (autoEnterVr == null || !autoEnterVr.Value) return;
         EnsureAutoEnterLoop();
@@ -77,7 +77,7 @@ public class ModXrManager : MonoBehaviour
     {
         if (IsVrEnabled) return;
         if (autoEnterVr == null || !autoEnterVr.Value) return;
-        Debug.Log($"[ShipbreakerVr] Scene loaded '{scene.name}' — ensuring auto-VR retry loop.");
+        ModLog.Info($"[XR] Scene loaded '{scene.name}' — ensuring auto-VR retry loop.");
         EnsureAutoEnterLoop();
     }
 
@@ -101,21 +101,21 @@ public class ModXrManager : MonoBehaviour
         {
             if (IsVrEnabled)
             {
-                Debug.Log("[ShipbreakerVr] Auto-VR already active — stopping retry loop.");
+                ModLog.Info("[XR] Auto-VR already active — stopping retry loop.");
                 break;
             }
 
-            Debug.Log($"[ShipbreakerVr] Auto-enter VR attempt {attempt}/{maxAttempts}...");
+            ModLog.Info($"[XR] Auto-enter VR attempt {attempt}/{maxAttempts}...");
             var error = TryEnableVr();
             if (IsVrEnabled)
             {
-                Debug.Log("[ShipbreakerVr] Auto-entered VR (no F3 required).");
+                ModLog.Info("[XR] Auto-entered VR (no F3 required).");
                 LogXrStatus();
                 break;
             }
 
-            Debug.LogWarning(
-                $"[ShipbreakerVr] Auto-enter VR attempt {attempt} did not stick. {error} " +
+            ModLog.Warn(
+                $"[XR] Auto-enter VR attempt {attempt} did not stick. {error} " +
                 "Will retry (SteamVR/OpenXR may still be starting). F3 remains emergency toggle.");
 
             yield return new WaitForSecondsRealtime(delay);
@@ -123,8 +123,8 @@ public class ModXrManager : MonoBehaviour
 
         if (!IsVrEnabled)
         {
-            Debug.LogError(
-                "[ShipbreakerVr] Auto-enter VR gave up after retries. You are likely in SteamVR " +
+            ModLog.Error(
+                "[XR] Auto-enter VR gave up after retries. You are likely in SteamVR " +
                 "theater/flat mode. Check BepInEx\\LogOutput.log, confirm winhttp.dll is next to " +
                 "Shipbreaker.exe, confirm SteamVR is the active OpenXR runtime, then press F3 once. " +
                 "See install-and-test.md → theater-mode troubleshooting.");
@@ -146,9 +146,9 @@ public class ModXrManager : MonoBehaviour
         {
             var error = TryEnableVr();
             if (!IsVrEnabled)
-                Debug.LogError($"[ShipbreakerVr] F3 enable failed: {error}");
+                ModLog.Error($"[XR] F3 enable failed: {error}");
             else
-                Debug.Log("[ShipbreakerVr] F3 enabled VR.");
+                ModLog.Info("[XR] F3 enabled VR.");
             LogXrStatus();
         }
     }
@@ -178,14 +178,14 @@ public class ModXrManager : MonoBehaviour
             }
             catch (Exception e)
             {
-                Debug.LogWarning($"[ShipbreakerVr] StartSubsystems: {e.Message}");
+                ModLog.Warn($"[XR] StartSubsystems: {e.Message}");
             }
 
             if (!loader.Initialize())
-                Debug.LogWarning("[ShipbreakerVr] activeLoader.Initialize() returned false (may already be init).");
+                ModLog.Warn("[XR] activeLoader.Initialize() returned false (may already be init).");
 
             if (!loader.Start())
-                Debug.LogWarning("[ShipbreakerVr] activeLoader.Start() returned false.");
+                ModLog.Warn("[XR] activeLoader.Start() returned false.");
 
             // Re-resolve loader typed reference after start.
             _openXrLoader = manager.ActiveLoaderAs<OpenXRLoaderBase>() ?? _openXrLoader;
@@ -220,11 +220,11 @@ public class ModXrManager : MonoBehaviour
         }
         catch (Exception e)
         {
-            Debug.LogWarning($"[ShipbreakerVr] Disable VR error: {e.Message}");
+            ModLog.Warn($"[XR] Disable VR error: {e.Message}");
         }
 
         IsVrEnabled = false;
-        Debug.Log("[ShipbreakerVr] VR disabled (F3).");
+        ModLog.Info("[XR] VR disabled (F3).");
     }
 
     /// <summary>Returns null on success, otherwise error detail. Does not throw.</summary>
@@ -232,11 +232,11 @@ public class ModXrManager : MonoBehaviour
     {
         try
         {
-            Debug.Log("[ShipbreakerVr] SetUpXr: loading xrmanager asset bundle...");
+            ModLog.Info("[XR] SetUpXr: loading xrmanager asset bundle...");
             var xrManagerBundle = VrAssetManager.LoadBundle("xrmanager");
 
             foreach (var xrManager in xrManagerBundle.LoadAllAssets())
-                Debug.Log($"[ShipbreakerVr] Loaded xrManager asset: {xrManager.name}");
+                ModLog.Info($"[XR] Loaded xrManager asset: {xrManager.name}");
 
             var instance = XRGeneralSettings.Instance;
             if (instance == null) return "XRGeneralSettings.Instance is null after loading asset bundle.";
@@ -257,7 +257,7 @@ public class ModXrManager : MonoBehaviour
             _ = OpenXRSettings.Instance;
 
             isXrSetUp = true;
-            Debug.Log("[ShipbreakerVr] SetUpXr OK — OpenXR loader ready.");
+            ModLog.Info("[XR] SetUpXr OK — OpenXR loader ready.");
             return null;
         }
         catch (Exception e)
@@ -287,14 +287,14 @@ public class ModXrManager : MonoBehaviour
             var loaderName = XRGeneralSettings.Instance?.Manager?.activeLoader != null
                 ? XRGeneralSettings.Instance.Manager.activeLoader.name
                 : "(none)";
-            Debug.Log(
-                $"[ShipbreakerVr] XR status: IsVrEnabled={IsVrEnabled}, IsInitialized={IsInitialized}, " +
+            ModLog.Info(
+                $"[XR] status: IsVrEnabled={IsVrEnabled}, IsInitialized={IsInitialized}, " +
                 $"displayRunning={IsDisplaySubsystemRunning()}, loader={loaderName}, " +
                 $"XRSettings.enabled={XRSettings.enabled}, loadedDeviceName={XRSettings.loadedDeviceName}");
         }
         catch (Exception e)
         {
-            Debug.LogWarning($"[ShipbreakerVr] LogXrStatus failed: {e.Message}");
+            ModLog.Warn($"[XR] LogXrStatus failed: {e.Message}");
         }
     }
 
@@ -302,12 +302,14 @@ public class ModXrManager : MonoBehaviour
     {
         try
         {
-            foreach (var ui in FindObjectsOfType<VrUi>())
-                ui.PlaceInFrontOfPlayer(force: true);
+            var lockers = FindObjectsOfType<VrMenuWorldLock>();
+            foreach (var locker in lockers)
+                locker.RecenterAllPublic();
+            ModLog.Info("[XR] requested VrMenuWorldLock recenter after VR enable.");
         }
         catch (Exception e)
         {
-            Debug.LogWarning($"[ShipbreakerVr] RecenterAllVrUi: {e.Message}");
+            ModLog.Warn($"[XR] RecenterAllVrUi: {e.Message}");
         }
     }
 }

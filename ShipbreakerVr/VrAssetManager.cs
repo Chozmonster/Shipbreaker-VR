@@ -11,12 +11,12 @@ public static class VrAssetManager
 
     public static AssetBundle LoadBundle(string assetName)
     {
-        Debug.Log($"loading bundle {assetName} in {Paths.PluginPath}...");
+        ModLog.Info($"loading bundle {assetName} in {Paths.PluginPath}...");
         var bundle = AssetBundle.LoadFromFile(Path.Combine(Paths.PluginPath, Path.Combine(AssetsDir, assetName)));
 
         if (bundle == null) throw new Exception("Failed to load asset bundle " + assetName);
 
-        Debug.Log($"Loaded bundle {bundle.name}");
+        ModLog.Info($"Loaded bundle {bundle.name}");
 
         return bundle;
     }

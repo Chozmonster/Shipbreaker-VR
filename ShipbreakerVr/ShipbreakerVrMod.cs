@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace ShipbreakerVr;
 
-[BepInPlugin("ShipbreakerVr", "ShipbreakerVr", "0.4.3")]
+[BepInPlugin("ShipbreakerVr", "ShipbreakerVr", "0.4.4")]
 public class ShipbreakerVrMod : BaseUnityPlugin
 {
     private bool enableLights = true;
@@ -14,14 +14,20 @@ public class ShipbreakerVrMod : BaseUnityPlugin
 
     private void Awake()
     {
-        Debug.Log($"Loaded ShipbreakerVr {Info.Metadata.Version}. Game version: {Application.version}");
+        ModLog.Init(Logger);
+        ModLog.Info($"======= ShipbreakerVr 0.4.4 starting (game {Application.version}) =======");
+        ModLog.Info("Expect log tags: [WorldLock] [UiPointer] [VrCamera] [XR]");
 
         Harmony.CreateAndPatchAll(Assembly.GetExecutingAssembly());
+        ModLog.Info("Harmony patches applied.");
 
         var xr = gameObject.AddComponent<ModXrManager>();
         xr.InitConfig(Config);
 
+        gameObject.AddComponent<VrMenuWorldLock>();
         gameObject.AddComponent<VrUiLaser>();
+
+        ModLog.Info("Components: ModXrManager, VrMenuWorldLock, VrUiLaser.");
     }
 
     private void Update()
@@ -33,7 +39,7 @@ public class ShipbreakerVrMod : BaseUnityPlugin
     private static void SetPotatoQuality()
     {
         QualitySettings.SetQualityLevel(0);
-        Debug.Log("[ShipbreakerVr] Potato quality (F5).");
+        ModLog.Info("Potato quality (F5).");
     }
 
     private void DisableLights()
@@ -49,12 +55,12 @@ public class ShipbreakerVrMod : BaseUnityPlugin
                 light.enabled = false;
             }
 
-            Debug.Log("[ShipbreakerVr] Lights disabled (F6).");
+            ModLog.Info("Lights disabled (F6).");
         }
         else
         {
             foreach (var light in lights) light.enabled = true;
-            Debug.Log("[ShipbreakerVr] Lights restored (F6).");
+            ModLog.Info("Lights restored (F6).");
         }
     }
 }

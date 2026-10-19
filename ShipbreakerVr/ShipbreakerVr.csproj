@@ -3,7 +3,7 @@
         <TargetFramework>net48</TargetFramework>
         <AssemblyName>ShipbreakerVr</AssemblyName>
         <Description>Hardspace: Shipbreaker VR mod (Chozmonster fork — auto-VR + VR menus)</Description>
-        <Version>0.4.3</Version>
+        <Version>0.4.4</Version>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <LangVersion>latest</LangVersion>
         <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
