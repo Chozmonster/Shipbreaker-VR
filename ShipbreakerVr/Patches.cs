@@ -6,9 +6,7 @@ using UnityEngine.UI;
 namespace ShipbreakerVr;
 
 /// <summary>
-/// Camera patch is isolated from menu patches. 0.4.4's Canvas.OnEnable patch used
-/// DeclaredMethod on a method that lives on Behaviour — Harmony failed and aborted
-/// CreateAndPatchAll before ModXrManager/VrCamera were created.
+/// Camera patch isolated from menu patches. Never abort Awake on menu patch failure.
 /// </summary>
 public static class CameraPatches
 {
@@ -51,61 +49,41 @@ public static class MenuPatches
 {
     public static void Apply(Harmony harmony)
     {
-        // OnEnable is inherited (UIBehaviour/MonoBehaviour) — must use AccessTools.Method,
-        // NOT DeclaredMethod / patch-type OnEnable on Canvas itself.
+        // 0.4.6: do NOT attach VrUi (stock LateUpdate HMD-follow fought WorldLock in 0.4.5).
+        // VrMenuWorldLock owns FrontEnd canvases. Keep a log-only hook for diagnostics.
         var onEnable = AccessTools.Method(typeof(CanvasScaler), "OnEnable");
         if (onEnable == null)
         {
-            ModLog.Warn("[WorldLock] CanvasScaler.OnEnable not found — menu VrUi attach skipped.");
+            ModLog.Warn("[WorldLock] CanvasScaler.OnEnable not found — diagnostic hook skipped.");
             return;
         }
 
         harmony.Patch(onEnable,
-            postfix: new HarmonyMethod(typeof(MenuPatches), nameof(AttachMenuVrUi)));
-        ModLog.Info("[WorldLock] Harmony postfix on CanvasScaler.OnEnable applied (AccessTools.Method).");
+            postfix: new HarmonyMethod(typeof(MenuPatches), nameof(LogMenuCanvas)));
+        ModLog.Info(
+            "[WorldLock] CanvasScaler.OnEnable diagnostic hook applied (no VrUi attach — WorldLock owns menus).");
     }
 
-    private static void AttachMenuVrUi(CanvasScaler __instance)
+    private static void LogMenuCanvas(CanvasScaler __instance)
     {
         try
         {
             var canvas = __instance.GetComponent<Canvas>();
             if (!canvas || !canvas.isRootCanvas) return;
-            if (canvas.renderMode == RenderMode.WorldSpace) return;
-            if (canvas.GetComponent<VrUi>()) return;
-            if (canvas.GetComponent<Camera>()) return;
-            if (canvas.GetComponentInParent<VrCamera>()) return;
-
             var n = canvas.gameObject.name;
-            if (ContainsAny(n, "HUD", "Hud", "reticule", "reticle", "fade", "Fade", "Marker", "XR",
-                    "VrCamera"))
-            {
-                ModLog.Info($"[WorldLock] skip CanvasScaler '{n}' (protected/non-menu)");
+            if (n.IndexOf("FrontEnd", StringComparison.OrdinalIgnoreCase) < 0 &&
+                n.IndexOf("Frontend", StringComparison.OrdinalIgnoreCase) < 0 &&
+                n.IndexOf("Menu", StringComparison.OrdinalIgnoreCase) < 0 &&
+                n.IndexOf("Pause", StringComparison.OrdinalIgnoreCase) < 0)
                 return;
-            }
 
-            var looksMenu = ContainsAny(n, "Menu", "FrontEnd", "Pause", "Profile", "FreePlay", "Options",
-                "Hab", "Inventory", "Weekly", "Level");
-            if (!looksMenu && canvas.GetComponentInChildren<Selectable>(true) == null)
-            {
-                ModLog.Info($"[WorldLock] skip CanvasScaler '{n}' (no menu hint / selectables)");
-                return;
-            }
-
-            canvas.gameObject.AddComponent<VrUi>();
-            ModLog.Info($"[WorldLock][Menu] attached VrUi via CanvasScaler to '{n}'");
+            ModLog.Info(
+                $"[WorldLock][Menu] CanvasScaler saw '{n}' mode={canvas.renderMode} " +
+                $"(WorldLock will lock — not attaching VrUi)");
         }
         catch (Exception e)
         {
-            ModLog.Warn("[WorldLock] AttachMenuVrUi exception: " + e.Message);
+            ModLog.Warn("[WorldLock] LogMenuCanvas: " + e.Message);
         }
-    }
-
-    private static bool ContainsAny(string hay, params string[] needles)
-    {
-        foreach (var n in needles)
-            if (hay.IndexOf(n, System.StringComparison.OrdinalIgnoreCase) >= 0)
-                return true;
-        return false;
     }
 }

@@ -8,13 +8,11 @@ using UnityEngine.XR;
 namespace ShipbreakerVr;
 
 /// <summary>
-/// Controller → UI pointer. Uses XRNode states first (works when InputDevices is empty),
-/// then InputDevices. Feeds a virtual mouse into StandaloneInputModule so Doozy/uGUI
-/// see controller aim as mouse. Gaze fallback only if no controller tracked.
+/// Controller → UI pointer. XRNode first. Gaze is failure mode (logged), not success.
 /// </summary>
 public class VrUiLaser : MonoBehaviour
 {
-    private const float MaxDistance = 10f;
+    private const float MaxDistance = 12f;
     private const float StatusInterval = 1f;
 
     private LineRenderer line;
@@ -28,6 +26,7 @@ public class VrUiLaser : MonoBehaviour
     private Vector3 lastDir;
     private VrVirtualMouseInput virtualMouse;
     private bool menuLikelyOpen;
+    private int gazeFallbackLogs;
 
     private enum PointerSource
     {
@@ -48,9 +47,7 @@ public class VrUiLaser : MonoBehaviour
         line.endWidth = 0.002f;
         var shader = Shader.Find("Sprites/Default") ?? Shader.Find("Unlit/Color") ?? Shader.Find("UI/Default");
         if (shader != null)
-        {
             line.material = new Material(shader) { color = new Color(0.2f, 0.9f, 1f, 1f) };
-        }
 
         line.startColor = new Color(0.2f, 0.95f, 1f, 1f);
         line.endColor = new Color(0.2f, 0.95f, 1f, 0.2f);
@@ -59,7 +56,7 @@ public class VrUiLaser : MonoBehaviour
         line.sortingOrder = 9000;
 
         EnsureVirtualMouse();
-        ModLog.Info("[UiPointer] laser ready (XRNode → InputDevices → gaze).");
+        ModLog.Info("[UiPointer] laser ready — expect source=XrNodeRight/Left when hands tracked (gaze ≠ success).");
     }
 
     private void EnsureVirtualMouse()
@@ -77,15 +74,11 @@ public class VrUiLaser : MonoBehaviour
 
         virtualMouse = EventSystem.current.GetComponent<VrVirtualMouseInput>();
         if (!virtualMouse) virtualMouse = EventSystem.current.gameObject.AddComponent<VrVirtualMouseInput>();
-        // StandaloneInputModule uses its own input override via reflection in older Unity —
-        // also assign through InputModule's m_InputOverride if present.
         TrySetInputOverride(module, virtualMouse);
-        ModLog.Info("[UiPointer] virtual mouse bound to EventSystem/StandaloneInputModule.");
     }
 
     private static void TrySetInputOverride(StandaloneInputModule module, BaseInput input)
     {
-        // Unity UI StandaloneInputModule has protected input override via `input` / m_InputOverride.
         var type = typeof(BaseInputModule);
         var field = type.GetField("m_InputOverride",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
@@ -111,7 +104,7 @@ public class VrUiLaser : MonoBehaviour
 
         if (EventSystem.current == null || virtualMouse == null) EnsureVirtualMouse();
 
-        eventCamera = VrCamera.MainCamera ? VrCamera.MainCamera : Camera.main;
+        eventCamera = MenuWorldPlacement.ResolveAnyCamera();
         menuLikelyOpen = IsAnyWorldMenuUp();
 
         if (!TryGetPointerRay(out var origin, out var direction, out var source, out var deviceName))
@@ -126,34 +119,38 @@ public class VrUiLaser : MonoBehaviour
         lastOrigin = origin;
         lastDir = direction;
 
-        // Prefer controller; only use gaze if no controller (and log that clearly).
+        if (source == PointerSource.Gaze)
+        {
+            gazeFallbackLogs++;
+            if (gazeFallbackLogs <= 3 || gazeFallbackLogs % 30 == 0)
+                ModLog.Warn(
+                    "[UiPointer] GAZE FALLBACK (not success) — no tracked controller pose. " +
+                    "Hands should yield source=XrNodeRight/Left.");
+        }
+
         line.enabled = true;
         line.SetPosition(0, origin);
         line.SetPosition(1, origin + direction * MaxDistance);
 
-        var hitUi = RaycastUi(origin, direction, out var distance, out var hitObject, out var screenPoint);
+        var hitUi = RaycastUi(origin, direction, out var distance, out var hitObject, out var screenPoint,
+            out var selectableName);
         if (hitUi)
-        {
             line.SetPosition(1, origin + direction * distance);
-            UpdateHover(hitObject);
-        }
         else
-        {
             ClearHover();
-            // Still project a mouse point along the ray for Doozy hover at distance
-            if (eventCamera)
-                screenPoint = eventCamera.WorldToScreenPoint(origin + direction * 2f);
-        }
+
+        if (hitUi) UpdateHover(hitObject);
 
         var trigger = IsTriggerPressed();
         if (virtualMouse != null)
         {
-            // Drive virtual mouse whenever we have a controller pointer (not gaze-only),
-            // so menus receive controller-as-mouse even before a collider hit.
-            var useVirtual = source != PointerSource.Gaze && source != PointerSource.None;
+            var useVirtual = source is PointerSource.XrNodeRight or PointerSource.XrNodeLeft
+                or PointerSource.InputDevice;
             virtualMouse.Active = useVirtual;
             if (useVirtual)
             {
+                if (!hitUi && eventCamera)
+                    screenPoint = eventCamera.WorldToScreenPoint(origin + direction * 2f);
                 virtualMouse.ScreenPosition = new Vector2(screenPoint.x, screenPoint.y);
                 virtualMouse.LeftPressed = trigger;
             }
@@ -166,33 +163,41 @@ public class VrUiLaser : MonoBehaviour
         if (Time.unscaledTime >= nextStatus)
         {
             nextStatus = Time.unscaledTime + StatusInterval;
-            LogPointerStatus(hitObject, trigger);
+            LogPointerStatus(hitObject, selectableName, trigger, hitUi, distance);
         }
     }
 
-    private void LogPointerStatus(GameObject hover, bool trigger)
+    private void LogPointerStatus(GameObject hover, string selectableName, bool trigger, bool hitUi,
+        float distance)
     {
         var sb = new StringBuilder();
         sb.Append("[UiPointer] ");
         sb.Append($"source={lastSource} device='{lastDeviceName}' ");
         sb.Append($"origin={lastOrigin} dir={lastDir} ");
-        sb.Append($"menuOpen={menuLikelyOpen} trigger={trigger} ");
+        sb.Append($"menuOpen={menuLikelyOpen} hitUi={hitUi} dist={distance:0.00} ");
+        sb.Append($"trigger={trigger} ");
         sb.Append($"hover={(hover ? hover.name : "none")} ");
-        sb.Append($"virtualMouse={(virtualMouse != null && virtualMouse.Active)}");
-        // List XR nodes briefly
+        sb.Append($"selectable={(string.IsNullOrEmpty(selectableName) ? "none" : selectableName)} ");
+        sb.Append($"virtualMouse={(virtualMouse != null && virtualMouse.Active)} ");
+        sb.Append(
+            $"eventCam={(eventCamera ? eventCamera.name : "null")} ");
+
         var nodes = new List<XRNodeState>();
         InputTracking.GetNodeStates(nodes);
-        sb.Append(" nodes=");
+        sb.Append("nodes=");
         foreach (var n in nodes)
         {
-            if (n.nodeType is XRNode.RightHand or XRNode.LeftHand or XRNode.GameController)
+            if (n.nodeType is XRNode.RightHand or XRNode.LeftHand or XRNode.Head)
             {
                 n.TryGetPosition(out var p);
                 sb.Append($"[{n.nodeType} tracked={n.tracked} pos={p}]");
             }
         }
 
-        ModLog.Info(sb.ToString());
+        if (lastSource == PointerSource.Gaze)
+            ModLog.Warn(sb.ToString());
+        else
+            ModLog.Info(sb.ToString());
     }
 
     private static bool IsAnyWorldMenuUp()
@@ -231,6 +236,16 @@ public class VrUiLaser : MonoBehaviour
         if (TryGetInputDeviceRay(out origin, out direction, out deviceName))
         {
             source = PointerSource.InputDevice;
+            return true;
+        }
+
+        // Gaze = last resort only
+        if (MenuWorldPlacement.TryGetPlayerView(out var view))
+        {
+            origin = view.Position;
+            direction = (view.Rotation * Vector3.forward).normalized;
+            source = PointerSource.Gaze;
+            deviceName = "Gaze/" + view.Source;
             return true;
         }
 
@@ -273,7 +288,6 @@ public class VrUiLaser : MonoBehaviour
 
         var devices = new List<InputDevice>();
         InputDevices.GetDevices(devices);
-        // Prefer right-ish controllers first
         devices.Sort((a, b) => Score(b).CompareTo(Score(a)));
 
         foreach (var d in devices)
@@ -310,11 +324,12 @@ public class VrUiLaser : MonoBehaviour
     }
 
     private bool RaycastUi(Vector3 origin, Vector3 direction, out float distance, out GameObject hitObject,
-        out Vector3 screenPoint)
+        out Vector3 screenPoint, out string selectableName)
     {
         distance = MaxDistance;
         hitObject = null;
         screenPoint = Vector3.zero;
+        selectableName = null;
 
         if (Physics.Raycast(origin, direction, out var physHit, MaxDistance, ~0, QueryTriggerInteraction.Collide))
         {
@@ -322,15 +337,20 @@ public class VrUiLaser : MonoBehaviour
             if (canvas && canvas.renderMode == RenderMode.WorldSpace)
             {
                 distance = physHit.distance;
-                screenPoint = (canvas.worldCamera ? canvas.worldCamera : eventCamera)
-                    ? (canvas.worldCamera ? canvas.worldCamera : eventCamera).WorldToScreenPoint(physHit.point)
-                    : Vector3.zero;
-                hitObject = FindSelectableAt(canvas, physHit.point) ?? physHit.collider.gameObject;
+                var cam = canvas.worldCamera ? canvas.worldCamera : eventCamera;
+                screenPoint = cam ? cam.WorldToScreenPoint(physHit.point) : Vector3.zero;
+                var sel = FindSelectableAt(canvas, physHit.point);
+                hitObject = sel ?? physHit.collider.gameObject;
+                selectableName = sel ? sel.name : null;
                 return true;
             }
         }
 
-        // Plane test against world-space canvases (works even if collider missing/wrong size)
+        // Plane test — also try GraphicRaycaster via EventSystem
+        Canvas bestCanvas = null;
+        var bestEnter = MaxDistance;
+        Vector3 bestPoint = default;
+
         foreach (var canvas in FindObjectsOfType<Canvas>())
         {
             if (!canvas || !canvas.isRootCanvas || !canvas.isActiveAndEnabled) continue;
@@ -338,18 +358,31 @@ public class VrUiLaser : MonoBehaviour
             var rt = canvas.GetComponent<RectTransform>();
             if (!rt) continue;
 
+            // Canvas faces viewer with same rot as camera → plane normal is canvas.forward
             var plane = new Plane(canvas.transform.forward, canvas.transform.position);
             var ray = new Ray(origin, direction);
-            if (!plane.Raycast(ray, out var enter) || enter < 0f || enter > MaxDistance) continue;
-            var point = ray.GetPoint(enter);
-            var cam = canvas.worldCamera ? canvas.worldCamera : eventCamera;
-            if (!cam) continue;
-            if (!RectTransformUtility.RectangleContainsScreenPoint(rt, cam.WorldToScreenPoint(point), cam))
-                continue;
+            if (!plane.Raycast(ray, out var enter) || enter < 0.05f || enter > MaxDistance) continue;
 
-            distance = enter;
-            screenPoint = cam.WorldToScreenPoint(point);
-            hitObject = FindSelectableAt(canvas, point) ?? canvas.gameObject;
+            var point = ray.GetPoint(enter);
+            // Local-space rect test (more reliable than screen for wrong worldCamera)
+            if (!PointInCanvasRect(rt, point)) continue;
+
+            if (enter < bestEnter)
+            {
+                bestEnter = enter;
+                bestPoint = point;
+                bestCanvas = canvas;
+            }
+        }
+
+        if (bestCanvas)
+        {
+            distance = bestEnter;
+            var cam = bestCanvas.worldCamera ? bestCanvas.worldCamera : eventCamera;
+            screenPoint = cam ? cam.WorldToScreenPoint(bestPoint) : Vector3.zero;
+            var sel = FindSelectableAt(bestCanvas, bestPoint);
+            hitObject = sel ?? bestCanvas.gameObject;
+            selectableName = sel ? sel.name : null;
             return true;
         }
 
@@ -358,22 +391,39 @@ public class VrUiLaser : MonoBehaviour
         return false;
     }
 
+    private static bool PointInCanvasRect(RectTransform rt, Vector3 worldPoint)
+    {
+        var local = rt.InverseTransformPoint(worldPoint);
+        var rect = rt.rect;
+        // Generous padding so slightly-off rays still count
+        const float pad = 20f;
+        return local.x >= rect.xMin - pad && local.x <= rect.xMax + pad &&
+               local.y >= rect.yMin - pad && local.y <= rect.yMax + pad;
+    }
+
     private static GameObject FindSelectableAt(Canvas canvas, Vector3 worldPoint)
     {
-        var cam = canvas.worldCamera ? canvas.worldCamera : Camera.main;
-        if (!cam) return null;
-        var screen = cam.WorldToScreenPoint(worldPoint);
         var selectables = canvas.GetComponentsInChildren<Selectable>(false);
+        GameObject best = null;
+        var bestDist = float.MaxValue;
         foreach (var s in selectables)
         {
             if (!s.IsInteractable() || !s.gameObject.activeInHierarchy) continue;
             var rt = s.transform as RectTransform;
             if (!rt) continue;
-            if (RectTransformUtility.RectangleContainsScreenPoint(rt, screen, cam))
-                return s.gameObject;
+            var local = rt.InverseTransformPoint(worldPoint);
+            var rect = rt.rect;
+            if (local.x < rect.xMin || local.x > rect.xMax || local.y < rect.yMin || local.y > rect.yMax)
+                continue;
+            var d = local.z * local.z;
+            if (d < bestDist)
+            {
+                bestDist = d;
+                best = s.gameObject;
+            }
         }
 
-        return null;
+        return best;
     }
 
     private void UpdateHover(GameObject target)
@@ -411,9 +461,6 @@ public class VrUiLaser : MonoBehaviour
     {
         if (Input.GetMouseButton(0)) return true;
 
-        var nodes = new List<XRNodeState>();
-        InputTracking.GetNodeStates(nodes);
-        // Triggers come from InputDevices more reliably than XRNodeState
         var devices = new List<InputDevice>();
         InputDevices.GetDevices(devices);
         foreach (var d in devices)
@@ -445,7 +492,6 @@ public class VrVirtualMouseInput : BaseInput
 
     public override bool GetMouseButtonDown(int button)
     {
-        // Edge detection handled by input module via GetMouseButton; keep simple.
         if (Active && button == 0) return LeftPressed;
         return base.GetMouseButtonDown(button);
     }

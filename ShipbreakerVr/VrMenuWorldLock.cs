@@ -7,36 +7,32 @@ using UnityEngine.UI;
 namespace ShipbreakerVr;
 
 /// <summary>
-/// SAFE menu world-lock (0.4.5).
+/// 0.4.6 — fix Jay's 0.4.5 log: eyeCam=null bodyCam=null → menus at (0,-0.2,-2.3)
+/// while controllers tracked in real XR space → laser hover=none.
 ///
-/// 0.4.4 broke the VR view by converting nearly ALL root canvases to World Space and
-/// parking them in front of the HMD (fullscreen overlays blocked the camera).
-///
-/// This version is whitelist-only for menu-like canvases and never touches cameras,
-/// XR/HMD utility canvases, fades, or HUDs.
+/// Place using XRNode.Head (or Lynx/VrCamera when available). Comfort scale.
+/// LateUpdate snap kills HMD-follow. Do not rely on VrUi attach path.
 /// </summary>
 public class VrMenuWorldLock : MonoBehaviour
 {
-    private const float ForwardOffset = 1.8f;
-    private const float HeightOffset = -0.1f;
-    private const float ScanInterval = 0.75f;
-    private const float StatusInterval = 2.0f;
+    private const float ScanInterval = 0.35f;
+    private const float StatusInterval = 1.25f;
+    private const float DriftEps = 0.04f;
 
-    /// <summary>Only canvases whose names match these are candidates.</summary>
     private static readonly string[] MenuAllowHints =
     {
-        "MainMenu", "FrontEnd", "Pause", "FreePlay", "Free Mode", "Profile",
-        "LevelSelect", "Weekly", "Options", "Settings", "HabScreen", "Certificate",
-        "Inventory", "UIView", "Doozy"
+        "MainMenu", "FrontEnd", "Frontend", "Front-End", "Pause", "FreePlay", "Free Mode",
+        "Profile", "LevelSelect", "Weekly", "Options", "Settings", "HabScreen", "Hab",
+        "Certificate", "Inventory", "UIView", "Doozy", "UIManager", "Popup", "Popups",
+        "Dialog", "Menu", "Title", "Lobby", "Canvas - Front"
     };
 
-    /// <summary>Hard skip — never convert (protects camera / XR / overlays).</summary>
     private static readonly string[] HardSkipHints =
     {
-        "VrCamera", "XR", "OpenXR", "SteamVR", "reticule", "reticle", "crosshair",
-        "HUD", "Hud", "Marker", "fade", "Fade", "splash", "Splash", "loader", "Loader",
-        "FPS", "Console", "UnityExplorer", "Cursor", "Tooltip", "Toast", "Notify",
-        "Overlay", "Distortion", "Reboot", "Speech"
+        "VrCamera", "OpenXR", "SteamVR", "reticule", "reticle", "crosshair",
+        "HUD_Reticule", "HudReticule", "Marker", "fade", "Fade", "splash", "Splash",
+        "loader", "Loader", "FPS", "Console", "UnityExplorer", "Tooltip", "Toast",
+        "Notify", "Distortion", "Reboot", "Speech", "DamageVignette", "Vignette"
     };
 
     private float nextScan;
@@ -44,6 +40,10 @@ public class VrMenuWorldLock : MonoBehaviour
     private readonly Dictionary<int, LockedCanvas> locked = new();
     private int skippedProtected;
     private int skippedNonMenu;
+    private int snapCount;
+    private int deferredNoPose;
+    private bool loggedEmptyScan;
+    private string lastViewSource = "(none)";
 
     private class LockedCanvas
     {
@@ -53,21 +53,27 @@ public class VrMenuWorldLock : MonoBehaviour
         public Quaternion AnchorRot;
         public bool Anchored;
         public string Name;
+        public int DriftFixes;
+        public string ViewSource;
     }
 
     private void OnEnable()
     {
         SceneManager.sceneLoaded += OnSceneLoaded;
-        ModLog.Info("[WorldLock] SAFE mode (0.4.5): whitelist menus only — will not touch XR/HUD/fade canvases.");
+        ModLog.Info(
+            "[WorldLock] 0.4.6: XR head / Lynx pose → world plane " +
+            $"~{MenuWorldPlacement.TargetDistance:0.0}m + comfort scale. F4 recenter. Camera untouched.");
     }
 
     private void OnDisable() => SceneManager.sceneLoaded -= OnSceneLoaded;
 
     private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
-        ModLog.Info($"[WorldLock] SceneLoaded '{scene.name}' — clear menu anchors.");
+        ModLog.Info($"[WorldLock] SceneLoaded '{scene.name}' — clear anchors & rescan.");
         locked.Clear();
         nextScan = 0f;
+        loggedEmptyScan = false;
+        deferredNoPose = 0;
     }
 
     private void Update()
@@ -77,6 +83,9 @@ public class VrMenuWorldLock : MonoBehaviour
             if (locked.Count > 0) locked.Clear();
             return;
         }
+
+        // Neutralize conflicting VrUi on menus we own (0.4.5 attached both).
+        NeutralizeStockVrUi();
 
         if (Input.GetKeyDown(KeyCode.F4))
         {
@@ -89,8 +98,12 @@ public class VrMenuWorldLock : MonoBehaviour
             nextScan = Time.unscaledTime + ScanInterval;
             ScanAndLock();
         }
+    }
 
-        EnforceMenuLocksOnly();
+    private void LateUpdate()
+    {
+        if (!ModXrManager.IsVrEnabled) return;
+        EnforceWorldAnchors();
 
         if (Time.unscaledTime >= nextStatus)
         {
@@ -99,15 +112,42 @@ public class VrMenuWorldLock : MonoBehaviour
         }
     }
 
+    private void NeutralizeStockVrUi()
+    {
+        foreach (var ui in FindObjectsOfType<VrUi>())
+        {
+            if (!ui || !ui.enabled) continue;
+            // VrUi in 0.4.6 no longer LateUpdate-follows HMD, but dual systems still race.
+            // Disable it — WorldLock owns FrontEnd canvases.
+            ui.enabled = false;
+            ModLog.Info($"[WorldLock] disabled VrUi on '{ui.name}' (WorldLock owns placement).");
+        }
+    }
+
     private void ScanAndLock()
     {
+        if (!MenuWorldPlacement.TryGetPlayerView(out var view))
+        {
+            deferredNoPose++;
+            if (deferredNoPose <= 3 || deferredNoPose % 10 == 0)
+                ModLog.Warn(
+                    $"[WorldLock] defer lock — no player pose yet (source={view.Source}). " +
+                    $"eyeCam={(VrCamera.ActiveEyeCamera ? VrCamera.ActiveEyeCamera.name : "null")} " +
+                    $"bodyCam={(VrCamera.MainCamera ? VrCamera.MainCamera.name : "null")} " +
+                    $"deferred={deferredNoPose}");
+            return;
+        }
+
+        lastViewSource = view.Source;
         skippedProtected = 0;
         skippedNonMenu = 0;
         var newly = 0;
+        var seen = 0;
 
         foreach (var canvas in FindObjectsOfType<Canvas>())
         {
             if (!canvas || !canvas.isRootCanvas || !canvas.isActiveAndEnabled) continue;
+            seen++;
 
             if (IsProtected(canvas))
             {
@@ -115,7 +155,7 @@ public class VrMenuWorldLock : MonoBehaviour
                 continue;
             }
 
-            if (!IsMenuCandidate(canvas))
+            if (!IsMenuCandidate(canvas, out var why))
             {
                 skippedNonMenu++;
                 continue;
@@ -131,7 +171,7 @@ public class VrMenuWorldLock : MonoBehaviour
                     Name = Describe(canvas)
                 };
                 locked[id] = state;
-                ConvertAndAnchor(state, "scan-whitelist");
+                ConvertAndAnchor(state, view, "scan:" + why);
                 newly++;
             }
             else
@@ -147,108 +187,171 @@ public class VrMenuWorldLock : MonoBehaviour
         foreach (var id in dead) locked.Remove(id);
 
         if (newly > 0)
+        {
             ModLog.Info(
-                $"[WorldLock][Menu] newlyLocked={newly} tracked={locked.Count} " +
-                $"skippedProtected={skippedProtected} skippedNonMenu={skippedNonMenu}");
+                $"[WorldLock][Menu] newlyLocked={newly} tracked={locked.Count} view={view.Source} " +
+                $"headPos={view.Position} seenRoot={seen} skippedProtected={skippedProtected} " +
+                $"skippedNonMenu={skippedNonMenu}");
+            loggedEmptyScan = false;
+        }
+        else if (locked.Count == 0 && seen > 0 && !loggedEmptyScan)
+        {
+            ModLog.Warn(
+                $"[WorldLock] no menus locked (seenRoot={seen} skippedProtected={skippedProtected} " +
+                $"skippedNonMenu={skippedNonMenu} view={view.Source}). Dump:");
+            DumpCanvases();
+            loggedEmptyScan = true;
+        }
     }
 
-    private void EnforceMenuLocksOnly()
+    private void DumpCanvases()
     {
+        var n = 0;
+        foreach (var canvas in FindObjectsOfType<Canvas>())
+        {
+            if (!canvas || !canvas.isRootCanvas || !canvas.isActiveAndEnabled) continue;
+            var sel = canvas.GetComponentsInChildren<Selectable>(true).Length;
+            ModLog.Info(
+                $"[WorldLock][Dump] '{Describe(canvas)}' mode={canvas.renderMode} selectables={sel} " +
+                $"parent={(canvas.transform.parent ? canvas.transform.parent.name : "null")} " +
+                $"protected={IsProtected(canvas)} candidate={IsMenuCandidate(canvas, out var why)} why={why}");
+            if (++n >= 12) break;
+        }
+    }
+
+    private void EnforceWorldAnchors()
+    {
+        if (!MenuWorldPlacement.TryGetPlayerView(out var view) && locked.Count == 0)
+            return;
+
+        var drop = new List<int>();
         foreach (var kv in locked)
         {
             var state = kv.Value;
             var canvas = state.Canvas;
-            if (!canvas) continue;
+            if (!canvas)
+            {
+                drop.Add(kv.Key);
+                continue;
+            }
 
-            // If somehow a protected canvas got in, drop it immediately.
             if (IsProtected(canvas))
             {
-                ModLog.Warn($"[WorldLock] dropping protected canvas '{state.Name}' from tracker.");
+                drop.Add(kv.Key);
                 continue;
             }
 
             if (canvas.renderMode != RenderMode.WorldSpace)
             {
-                ModLog.Warn($"[WorldLock][Menu] '{state.Name}' mode reset to {canvas.renderMode} — re-locking.");
-                ConvertAndAnchor(state, "mode-reset");
+                if (!MenuWorldPlacement.TryGetPlayerView(out view)) continue;
+                ModLog.Warn($"[WorldLock][Menu] '{state.Name}' mode→{canvas.renderMode} — re-locking.");
+                ConvertAndAnchor(state, view, "mode-reset");
                 continue;
             }
 
-            // Only unparent if parent is a Camera (HMD glue). Don't yank arbitrary UI graphs.
-            var parentCam = state.Transform.GetComponentInParent<Camera>();
-            if (parentCam != null)
+            if (MenuWorldPlacement.DetachFromCameraHierarchy(state.Transform, out var parentName))
             {
-                ModLog.Warn(
-                    $"[WorldLock][Menu] '{state.Name}' under camera '{parentCam.name}' — unparenting canvas only.");
-                var pos = state.Transform.position;
-                var rot = state.Transform.rotation;
-                state.Transform.SetParent(null, true);
-                state.Transform.SetPositionAndRotation(pos, rot);
+                ModLog.Warn($"[WorldLock][Menu] '{state.Name}' re-parented under '{parentName}' — unparented.");
+                state.Anchored = false;
             }
 
             if (!state.Anchored)
-                ConvertAndAnchor(state, "enforce-anchor");
+            {
+                if (!MenuWorldPlacement.TryGetPlayerView(out view)) continue;
+                ConvertAndAnchor(state, view, "enforce-anchor");
+                continue;
+            }
+
+            var drifted = (state.Transform.position - state.AnchorPos).sqrMagnitude > DriftEps * DriftEps;
+            if (drifted || Quaternion.Angle(state.Transform.rotation, state.AnchorRot) > 2f)
+            {
+                state.Transform.SetPositionAndRotation(state.AnchorPos, state.AnchorRot);
+                state.DriftFixes++;
+                snapCount++;
+                if (state.DriftFixes == 1 || state.DriftFixes % 60 == 0)
+                    ModLog.Warn(
+                        $"[WorldLock][Menu] '{state.Name}' drifted (HMD-follow fight) — snapped " +
+                        $"fixes={state.DriftFixes} anchor={state.AnchorPos}");
+            }
         }
+
+        foreach (var id in drop) locked.Remove(id);
     }
 
-    private void ConvertAndAnchor(LockedCanvas state, string reason)
+    private void ConvertAndAnchor(LockedCanvas state, MenuWorldPlacement.PlayerView view, string reason)
     {
         var canvas = state.Canvas;
         if (!canvas || IsProtected(canvas)) return;
-
-        var cam = VrCamera.ActiveEyeCamera ? VrCamera.ActiveEyeCamera :
-            (VrCamera.MainCamera ? VrCamera.MainCamera : Camera.main);
-        if (!cam)
-        {
-            ModLog.Warn($"[WorldLock][Menu] no camera to anchor '{state.Name}' ({reason}).");
-            return;
-        }
-
-        // Never disable or reparent the camera itself.
-        if (canvas.GetComponent<Camera>() != null)
-        {
-            ModLog.Warn($"[WorldLock] refusing canvas-on-camera '{state.Name}'.");
-            return;
-        }
+        if (canvas.GetComponent<Camera>() != null) return;
 
         var t = state.Transform;
-        if (t.GetComponentInParent<Camera>() != null)
-            t.SetParent(null, true);
+        MenuWorldPlacement.DetachFromCameraHierarchy(t, out _);
 
-        if (t.localScale.x > 0.1f || t.localScale.x < 1e-5f)
-            t.localScale = Vector3.one * 0.001f;
+        var rect = canvas.GetComponent<RectTransform>();
+        MenuWorldPlacement.ApplyComfortScale(t, rect);
 
         canvas.renderMode = RenderMode.WorldSpace;
-        canvas.worldCamera = cam;
+        var eventCam = view.Camera ? view.Camera : MenuWorldPlacement.ResolveAnyCamera();
+        if (eventCam) canvas.worldCamera = eventCam;
+        canvas.planeDistance = MenuWorldPlacement.TargetDistance;
 
-        var scaler = canvas.GetComponent<CanvasScaler>();
-        if (scaler) scaler.enabled = false;
-        var improver = canvas.GetComponent<BBI.Unity.Game.CanvasScalerImprover>();
-        if (improver) improver.enabled = false;
+        MenuWorldPlacement.DisableScalers(canvas);
+        MenuWorldPlacement.EnsureCollider(canvas);
+        MenuWorldPlacement.EnsureGraphicRaycaster(canvas);
+        KillFollowBehaviours(canvas);
 
-        EnsureCollider(canvas);
+        // Strip VrUi so it cannot fight us.
+        var vrUi = canvas.GetComponent<VrUi>();
+        if (vrUi)
+        {
+            vrUi.enabled = false;
+            Object.Destroy(vrUi);
+            ModLog.Info($"[WorldLock] removed VrUi from '{state.Name}'");
+        }
 
-        var flatForward = cam.transform.forward;
-        flatForward.y = 0f;
-        if (flatForward.sqrMagnitude < 1e-4f) flatForward = Vector3.forward;
-        flatForward.Normalize();
-
-        state.AnchorPos = cam.transform.position + flatForward * ForwardOffset + Vector3.up * HeightOffset;
-        state.AnchorRot = Quaternion.LookRotation(flatForward, Vector3.up);
+        MenuWorldPlacement.ComputeAnchor(view, out state.AnchorPos, out state.AnchorRot);
         t.SetPositionAndRotation(state.AnchorPos, state.AnchorRot);
         state.Anchored = true;
+        state.ViewSource = view.Source;
 
+        var dist = Vector3.Distance(state.AnchorPos, view.Position);
         ModLog.Info(
-            $"[WorldLock][Menu] LOCKED '{state.Name}' reason={reason} pos={state.AnchorPos} " +
-            $"(camera '{cam.name}' untouched)");
+            $"[WorldLock][Menu] LOCKED '{state.Name}' reason={reason} view={view.Source} " +
+            $"head={view.Position} pos={state.AnchorPos} dist={dist:0.00}m " +
+            $"scale={t.localScale.x:0.######} " +
+            $"eyeCam={(VrCamera.ActiveEyeCamera ? VrCamera.ActiveEyeCamera.name : "null")} " +
+            $"bodyCam={(VrCamera.MainCamera ? VrCamera.MainCamera.name : "null")}");
+    }
+
+    private static void KillFollowBehaviours(Canvas canvas)
+    {
+        foreach (var mb in canvas.GetComponents<MonoBehaviour>())
+        {
+            if (!mb || mb is VrMenuWorldLock) continue;
+            var n = mb.GetType().Name;
+            if (n.IndexOf("Follow", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
+                n.IndexOf("Billboard", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
+                n.IndexOf("LookAt", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
+                n.IndexOf("HeadLock", System.StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                mb.enabled = false;
+                ModLog.Info($"[WorldLock] disabled '{n}' on '{canvas.name}'");
+            }
+        }
     }
 
     private void RecenterAll()
     {
+        if (!MenuWorldPlacement.TryGetPlayerView(out var view))
+        {
+            ModLog.Warn("[WorldLock] F4 failed — no player pose yet.");
+            return;
+        }
+
         foreach (var kv in locked)
         {
             kv.Value.Anchored = false;
-            ConvertAndAnchor(kv.Value, "F4");
+            ConvertAndAnchor(kv.Value, view, "F4");
         }
     }
 
@@ -256,9 +359,12 @@ public class VrMenuWorldLock : MonoBehaviour
 
     private void LogStatus()
     {
-        // Always remind that camera path is separate / protected.
+        MenuWorldPlacement.TryGetPlayerView(out var view);
+        lastViewSource = view.Source ?? lastViewSource;
+
         ModLog.Info(
-            $"[WorldLock] status trackedMenus={locked.Count} " +
+            $"[WorldLock] status trackedMenus={locked.Count} snaps={snapCount} " +
+            $"view={lastViewSource} head={view.Position} " +
             $"eyeCam={(VrCamera.ActiveEyeCamera ? VrCamera.ActiveEyeCamera.name : "null")} " +
             $"bodyCam={(VrCamera.MainCamera ? VrCamera.MainCamera.name : "null")} " +
             $"skippedProtected={skippedProtected} skippedNonMenu={skippedNonMenu}");
@@ -269,7 +375,8 @@ public class VrMenuWorldLock : MonoBehaviour
         {
             var s = kv.Value;
             if (!s.Canvas) continue;
-            sb.Append($" | {s.Name}");
+            var d = Vector3.Distance(s.AnchorPos, view.Position);
+            sb.Append($" | {s.Name} dist={d:0.00}m scale={s.Transform.localScale.x:0.######} via={s.ViewSource}");
             if (++i >= 5) break;
         }
 
@@ -279,8 +386,6 @@ public class VrMenuWorldLock : MonoBehaviour
     private static bool IsProtected(Canvas canvas)
     {
         if (!canvas) return true;
-
-        // Never touch a canvas on the same object as a Camera, or under VrCamera.
         if (canvas.GetComponent<Camera>() != null) return true;
         if (canvas.GetComponentInParent<VrCamera>() != null) return true;
 
@@ -292,25 +397,53 @@ public class VrMenuWorldLock : MonoBehaviour
             if (path.IndexOf(hint, System.StringComparison.OrdinalIgnoreCase) >= 0) return true;
         }
 
-        // Fullscreen Screen Space Overlay without menu keywords — leave alone (0.4.4 broke these).
-        if (canvas.renderMode == RenderMode.ScreenSpaceOverlay && !NameLooksLikeMenu(name) &&
-            !NameLooksLikeMenu(path))
+        if ((name.IndexOf("HUD", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
+             path.IndexOf("/HUD", System.StringComparison.OrdinalIgnoreCase) >= 0) &&
+            !NameLooksLikeMenu(name) && !NameLooksLikeMenu(path))
             return true;
 
         return false;
     }
 
-    private static bool IsMenuCandidate(Canvas canvas)
+    private static bool IsMenuCandidate(Canvas canvas, out string why)
     {
+        why = "skip";
         var name = canvas.gameObject.name;
         var path = Describe(canvas);
-        if (NameLooksLikeMenu(name) || NameLooksLikeMenu(path)) return true;
+        var selectables = canvas.GetComponentsInChildren<Selectable>(true).Length;
 
-        // Doozy / selectable-heavy UI under FrontEnd-ish parents
-        if (canvas.GetComponentInChildren<Selectable>(true) != null &&
-            (path.IndexOf("UI", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
-             path.IndexOf("Menu", System.StringComparison.OrdinalIgnoreCase) >= 0))
+        // Jay's canvases: "Canvas - FrontEnd", "Canvas - Frontend Popups"
+        if (name.IndexOf("FrontEnd", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
+            name.IndexOf("Frontend", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
+            path.IndexOf("FrontEnd", System.StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            why = "frontend";
             return true;
+        }
+
+        if (canvas.renderMode == RenderMode.ScreenSpaceCamera && selectables > 0)
+        {
+            why = "ss-camera+selectables";
+            return true;
+        }
+
+        if (NameLooksLikeMenu(name) || NameLooksLikeMenu(path))
+        {
+            why = "name-hint";
+            return true;
+        }
+
+        if (selectables >= 2)
+        {
+            why = "selectables=" + selectables;
+            return true;
+        }
+
+        if (canvas.transform.GetComponentInParent<Camera>() != null && selectables > 0)
+        {
+            why = "under-camera";
+            return true;
+        }
 
         return false;
     }
@@ -328,7 +461,7 @@ public class VrMenuWorldLock : MonoBehaviour
         var path = canvas.gameObject.name;
         var p = canvas.transform.parent;
         var depth = 0;
-        while (p != null && depth < 4)
+        while (p != null && depth < 5)
         {
             path = p.name + "/" + path;
             p = p.parent;
@@ -336,17 +469,5 @@ public class VrMenuWorldLock : MonoBehaviour
         }
 
         return path;
-    }
-
-    private static void EnsureCollider(Canvas canvas)
-    {
-        var rect = canvas.GetComponent<RectTransform>();
-        if (!rect) return;
-        var col = canvas.GetComponent<BoxCollider>() ?? canvas.gameObject.AddComponent<BoxCollider>();
-        var size = rect.rect.size;
-        col.size = new Vector3(Mathf.Max(Mathf.Abs(size.x), 100f), Mathf.Max(Mathf.Abs(size.y), 100f), 1f);
-        col.center = new Vector3(rect.rect.center.x, rect.rect.center.y, 0f);
-        col.isTrigger = true;
-        col.enabled = true;
     }
 }

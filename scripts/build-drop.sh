@@ -10,7 +10,7 @@ export PATH="${HOME}/.dotnet:${PATH}"
 # Staging folder only (not what Jay sees in the zip).
 STAGING_DIR="${ROOT}/dist/staging"
 DROP_DIR="${ROOT}/dist"
-VERSION="${VERSION:-0.4.5}"
+VERSION="${VERSION:-0.4.6}"
 ZIP_NAME="ShipbreakerVR-${VERSION}-jay.zip"
 
 echo "==> Cleaning ${STAGING_DIR}"
