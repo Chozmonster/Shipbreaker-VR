@@ -64,8 +64,8 @@ public class VrUiLaser : MonoBehaviour
 
         EnsureVirtualMouse();
         ModLog.Info(
-            "[UiPointer] laser ready — XRNode hand world pose + " +
-            $"{XrTracking.AimTipOffsetMeters * 100f:0}cm tip (no camera rebase / no meter offset).");
+            "[UiPointer] laser ready — grip origin + 90° pitch aim + " +
+            $"{XrTracking.AimTipOffsetMeters * 100f:0}cm tip (0.4.8).");
     }
 
     private void EnsureVirtualMouse()
@@ -190,6 +190,7 @@ public class VrUiLaser : MonoBehaviour
         sb.Append("[UiPointer] ");
         sb.Append($"source={lastSource} device='{lastDeviceName}' space={lastPoseSpace} ");
         sb.Append($"origin={lastOrigin} grip={lastGrip} dir={lastDir} ");
+        sb.Append($"dirY={lastDir.y:0.00} aimPitch=90 ");
         var gripDelta = Vector3.Distance(lastOrigin, lastGrip);
         sb.Append($"originGripDelta={gripDelta:0.000}m ");
         sb.Append($"menuOpen={menuLikelyOpen} hitUi={hitUi} dist={distance:0.00} ");

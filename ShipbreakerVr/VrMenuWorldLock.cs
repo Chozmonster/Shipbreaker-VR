@@ -7,11 +7,9 @@ using UnityEngine.UI;
 namespace ShipbreakerVr;
 
 /// <summary>
-/// 0.4.6 — fix Jay's 0.4.5 log: eyeCam=null bodyCam=null → menus at (0,-0.2,-2.3)
-/// while controllers tracked in real XR space → laser hover=none.
-///
-/// Place using XRNode.Head (or Lynx/VrCamera when available). Comfort scale.
-/// LateUpdate snap kills HMD-follow. Do not rely on VrUi attach path.
+/// 0.4.8 — restore world-lock (0.4.7 regression): re-parent fights must SNAP to the
+/// existing world anchor, never ConvertAndAnchor again (that re-baked from HMD = follow).
+/// Distance TargetDistance=1.0m. XR head for first lock / F4 only.
 /// </summary>
 public class VrMenuWorldLock : MonoBehaviour
 {
@@ -61,8 +59,8 @@ public class VrMenuWorldLock : MonoBehaviour
     {
         SceneManager.sceneLoaded += OnSceneLoaded;
         ModLog.Info(
-            "[WorldLock] 0.4.7: XR head / Lynx pose → world plane " +
-            $"~{MenuWorldPlacement.TargetDistance:0.0}m (TargetDistance) + comfort scale. F4 recenter. Camera untouched.");
+            "[WorldLock] 0.4.8: lock once from XR head → plane " +
+            $"TargetDistance={MenuWorldPlacement.TargetDistance:0.0}m; reparent fights snap (no HMD re-bake). F4 recenter.");
     }
 
     private void OnDisable() => SceneManager.sceneLoaded -= OnSceneLoaded;
@@ -249,10 +247,24 @@ public class VrMenuWorldLock : MonoBehaviour
                 continue;
             }
 
+            // Reparent fight: unparent + snap to FIXED world anchor.
+            // 0.4.7 bug: clearing Anchored here re-ran ConvertAndAnchor from current HMD = follow.
             if (MenuWorldPlacement.DetachFromCameraHierarchy(state.Transform, out var parentName))
             {
-                ModLog.Warn($"[WorldLock][Menu] '{state.Name}' re-parented under '{parentName}' — unparented.");
-                state.Anchored = false;
+                if (state.Anchored)
+                {
+                    state.Transform.SetPositionAndRotation(state.AnchorPos, state.AnchorRot);
+                    state.DriftFixes++;
+                    snapCount++;
+                    if (state.DriftFixes == 1 || state.DriftFixes % 60 == 0)
+                        ModLog.Warn(
+                            $"[WorldLock][Menu] '{state.Name}' re-parented under '{parentName}' — " +
+                            $"snapped to fixed anchor (no re-bake) fixes={state.DriftFixes}");
+                }
+                else
+                {
+                    ModLog.Warn($"[WorldLock][Menu] '{state.Name}' re-parented under '{parentName}' — unparented.");
+                }
             }
 
             if (!state.Anchored)
@@ -270,7 +282,7 @@ public class VrMenuWorldLock : MonoBehaviour
                 snapCount++;
                 if (state.DriftFixes == 1 || state.DriftFixes % 60 == 0)
                     ModLog.Warn(
-                        $"[WorldLock][Menu] '{state.Name}' drifted (HMD-follow fight) — snapped " +
+                        $"[WorldLock][Menu] '{state.Name}' drifted — snapped to fixed world anchor " +
                         $"fixes={state.DriftFixes} anchor={state.AnchorPos}");
             }
         }
@@ -317,8 +329,9 @@ public class VrMenuWorldLock : MonoBehaviour
         var dist = Vector3.Distance(state.AnchorPos, view.Position);
         ModLog.Info(
             $"[WorldLock][Menu] LOCKED '{state.Name}' reason={reason} view={view.Source} " +
+            $"TargetDistance={MenuWorldPlacement.TargetDistance:0.00} " +
             $"head={view.Position} pos={state.AnchorPos} dist={dist:0.00}m " +
-            $"scale={t.localScale.x:0.######} " +
+            $"scale={t.localScale.x:0.######} width~{MenuWorldPlacement.TargetWidthMeters:0.00}m " +
             $"eyeCam={(VrCamera.ActiveEyeCamera ? VrCamera.ActiveEyeCamera.name : "null")} " +
             $"bodyCam={(VrCamera.MainCamera ? VrCamera.MainCamera.name : "null")}");
     }

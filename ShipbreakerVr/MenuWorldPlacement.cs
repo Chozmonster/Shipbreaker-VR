@@ -6,19 +6,18 @@ using UnityEngine.XR;
 namespace ShipbreakerVr;
 
 /// <summary>
-/// Comfortable world-plane placement for menus.
-/// Prefer XR HMD pose (FrontEnd often has eyeCam/bodyCam null — LynxCamera not started yet).
-/// Target: ~1.3m ahead (Jay: 1.2–1.5m), panel scaled to stay fully visible.
+/// World-plane placement for menus. Target ~1.0m (Jay: 0.9–1.1m).
+/// Prefer XR head for lock pose (stable world-lock). Never re-bake anchor from HMD each frame.
 /// </summary>
 public static class MenuWorldPlacement
 {
     /// <summary>Meters ahead of player yaw-forward. F4 recenters to this distance.</summary>
-    public const float TargetDistance = 1.3f;
+    public const float TargetDistance = 1.0f;
 
-    public const float HeightOffset = -0.12f;
+    public const float HeightOffset = -0.1f;
 
-    /// <summary>World-space panel width at TargetDistance — full UI readable, not tiny.</summary>
-    public const float TargetWidthMeters = 1.2f;
+    /// <summary>World-space panel width at TargetDistance.</summary>
+    public const float TargetWidthMeters = 1.05f;
 
     public const float MinScale = 0.00035f;
     public const float MaxScale = 0.0035f;
@@ -28,20 +27,28 @@ public static class MenuWorldPlacement
         public Vector3 Position;
         public Quaternion Rotation;
         public string Source;
-        public Camera Camera; // may be null when using XRNode.Head only
+        public Camera Camera;
     }
 
     /// <summary>
-    /// Resolve where the player is looking.
-    /// FrontEnd: XRNode.Head (cameras often still at origin).
-    /// After VrCamera: prefer the render camera so menus share space with the HMD view.
+    /// Pose used when first locking / F4. XR head preferred (0.4.6 world-lock worked).
+    /// Do not prefer RotationOnly eye cam — that couples lock yaw to HMD look when mis-used.
     /// </summary>
     public static bool TryGetPlayerView(out PlayerView view)
     {
         view = default;
-        var hasHead = TryGetXrHead(out var headPos, out var headRot);
 
-        // 1) VrCamera eye/body when hooked and not stuck at origin — aligns with what HMD shows.
+        // 1) XR HMD — FrontEnd + stable world anchors
+        if (TryGetXrHead(out var headPos, out var headRot))
+        {
+            view.Position = headPos;
+            view.Rotation = headRot;
+            view.Source = "XRNode.Head";
+            view.Camera = ResolveAnyCamera();
+            return true;
+        }
+
+        // 2) VrCamera / Lynx when head not up yet
         if (VrCamera.ActiveEyeCamera && VrCamera.ActiveEyeCamera.transform.position.sqrMagnitude > 0.01f)
         {
             var c = VrCamera.ActiveEyeCamera;
@@ -62,17 +69,6 @@ public static class MenuWorldPlacement
             return true;
         }
 
-        // 2) XR HMD — correct during FrontEnd before LynxCameraController.Start.
-        if (hasHead)
-        {
-            view.Position = headPos;
-            view.Rotation = headRot;
-            view.Source = "XRNode.Head";
-            view.Camera = ResolveAnyCamera();
-            return true;
-        }
-
-        // 3) LynxCameraController if present but VrCamera not hooked yet.
         var lynx = Object.FindObjectOfType<LynxCameraController>();
         if (lynx)
         {
@@ -87,7 +83,6 @@ public static class MenuWorldPlacement
             }
         }
 
-        // 4) Camera.main — reject origin while XR up (0.4.5 bug).
         var cam = ResolveAnyCamera();
         if (cam)
         {
@@ -186,7 +181,6 @@ public static class MenuWorldPlacement
         if (XrTracking.TryGetNodePose(XRNode.Head, out pos, out rot))
             return true;
 
-        // InputDevices HMD fallback
         var devices = new List<InputDevice>();
         InputDevices.GetDevicesWithCharacteristics(
             InputDeviceCharacteristics.HeadMounted | InputDeviceCharacteristics.TrackedDevice, devices);

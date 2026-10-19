@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace ShipbreakerVr;
 
-[BepInPlugin("ShipbreakerVr", "ShipbreakerVr", "0.4.7")]
+[BepInPlugin("ShipbreakerVr", "ShipbreakerVr", "0.4.8")]
 public class ShipbreakerVrMod : BaseUnityPlugin
 {
     private bool enableLights = true;
@@ -16,10 +16,10 @@ public class ShipbreakerVrMod : BaseUnityPlugin
     private void Awake()
     {
         ModLog.Init(Logger);
-        ModLog.Info($"======= ShipbreakerVr 0.4.7 starting (game {Application.version}) =======");
+        ModLog.Info($"======= ShipbreakerVr 0.4.8 starting (game {Application.version}) =======");
         ModLog.Info(
-            $"Camera independent. Menus TargetDistance={MenuWorldPlacement.TargetDistance}m. " +
-            "Laser=XRNode hand world pose. Tags: [XR] [VrCamera] [WorldLock] [UiPointer]");
+            $"Camera independent. Menus TargetDistance={MenuWorldPlacement.TargetDistance}m (world-lock once). " +
+            "Laser aim = grip+90° pitch. Tags: [XR] [VrCamera] [WorldLock] [UiPointer]");
 
         harmony = new Harmony("ShipbreakerVr");
 
@@ -59,14 +59,14 @@ public class ShipbreakerVrMod : BaseUnityPlugin
         {
             gameObject.AddComponent<VrMenuWorldLock>();
             gameObject.AddComponent<VrUiLaser>();
-            ModLog.Info("[WorldLock][UiPointer] VrMenuWorldLock + VrUiLaser added (0.4.7 closer menus + hand-space laser).");
+            ModLog.Info("[WorldLock][UiPointer] VrMenuWorldLock + VrUiLaser added (0.4.8 aim pitch + 1m lock).");
         }
         catch (Exception e)
         {
             ModLog.Warn("Menu components failed to add: " + e.Message);
         }
 
-        ModLog.Info("======= ShipbreakerVr 0.4.7 Awake complete =======");
+        ModLog.Info("======= ShipbreakerVr 0.4.8 Awake complete =======");
     }
 
     private void Update()

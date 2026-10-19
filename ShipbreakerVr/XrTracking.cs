@@ -5,13 +5,19 @@ using UnityEngine.XR;
 namespace ShipbreakerVr;
 
 /// <summary>
-/// XR node poses. Laser aim uses the same tracking data as the physical controller,
-/// expressed in the space the HMD is rendering (avoids “laser origin meters away”).
+/// XR node poses. Laser origin = grip (+ tip cm). Aim = grip rotated +90° pitch (Jay 0.4.7:
+/// raw forward pointed straight up the handle).
 /// </summary>
 public static class XrTracking
 {
-    /// <summary>Aim tip along controller forward (grip → tip), centimeters only.</summary>
+    /// <summary>Aim tip along aim direction, centimeters only.</summary>
     public const float AimTipOffsetMeters = 0.04f;
+
+    /// <summary>
+    /// OpenXR grip +Z reads as "up the handle" in-headset. Pitch +90° local X so the
+    /// laser points out the front of the controller (Jay: "rotate it forward 90 degrees").
+    /// </summary>
+    public static readonly Quaternion GripToAimPitch = Quaternion.Euler(90f, 0f, 0f);
 
     public static bool TryGetNodePose(XRNode node, out Vector3 position, out Quaternion rotation)
     {
@@ -31,8 +37,10 @@ public static class XrTracking
 
         try
         {
+#pragma warning disable CS0618
             position = InputTracking.GetLocalPosition(node);
             rotation = InputTracking.GetLocalRotation(node);
+#pragma warning restore CS0618
             if (node != XRNode.Head && position.sqrMagnitude < 1e-8f)
                 return false;
             return true;
@@ -43,11 +51,14 @@ public static class XrTracking
         }
     }
 
+    public static Vector3 AimDirectionFromGripRotation(Quaternion gripRot)
+    {
+        return (gripRot * GripToAimPitch * Vector3.forward).normalized;
+    }
+
     /// <summary>
-    /// Controller aim ray in the same space as SteamVR hand visuals / menu hits.
-    /// Uses XRNode grip pose; only offset is AimTipOffsetMeters along forward.
-    /// When a render camera exists, re-expresses head-relative hand offset onto that camera
-    /// (RotationOnly body cam otherwise leaves raw tracking coords meters from the seen hand).
+    /// Controller aim ray. Origin stays on the grip (tip offset only). Direction pitched +90°.
+    /// Cam-rebase only for position when render cam diverges from XR head — does not change aim pitch.
     /// </summary>
     public static bool TryGetHandAim(XRNode hand, out Vector3 origin, out Vector3 direction, out Vector3 gripPos,
         out string space)
@@ -64,27 +75,25 @@ public static class XrTracking
         var cam = MenuWorldPlacement.ResolveAnyCamera();
         var hasHead = TryGetNodePose(XRNode.Head, out var headPos, out var headRot);
 
-        // If render cam and XR head diverge, raw tracking coords won't match the seen controller.
-        // Rebase: keep XR head→hand offset, apply to camera pose (HMD view space).
-        if (cam && hasHead &&
-            (cam.transform.position - headPos).sqrMagnitude > 0.09f) // >30cm
+        Quaternion aimRot;
+        if (cam && hasHead && (cam.transform.position - headPos).sqrMagnitude > 0.09f)
         {
             var localPos = Quaternion.Inverse(headRot) * (handPos - headPos);
             var localRot = Quaternion.Inverse(headRot) * handRot;
-            var worldRot = cam.transform.rotation * localRot;
+            aimRot = cam.transform.rotation * localRot;
             gripPos = cam.transform.position + cam.transform.rotation * localPos;
-            direction = (worldRot * Vector3.forward).normalized;
-            origin = gripPos + direction * AimTipOffsetMeters;
             space = "cam-rebase/" + cam.name;
-            return direction.sqrMagnitude > 1e-6f;
+        }
+        else
+        {
+            aimRot = handRot;
+            gripPos = handPos;
+            space = "xr-world";
         }
 
-        // Same space as XRNode world pose (FrontEnd / cam≈head).
-        direction = (handRot * Vector3.forward).normalized;
+        direction = AimDirectionFromGripRotation(aimRot);
         if (direction.sqrMagnitude < 1e-6f) direction = Vector3.forward;
-        origin = handPos + direction * AimTipOffsetMeters;
-        gripPos = handPos;
-        space = "xr-world";
+        origin = gripPos + direction * AimTipOffsetMeters;
         return true;
     }
 }
