@@ -1,0 +1,7 @@
+ManifestFileVersion: 0
+CRC: 2708478985
+AssetBundleManifest:
+  AssetBundleInfos:
+    Info_0:
+      Name: xrmanager
+      Dependencies: {}
