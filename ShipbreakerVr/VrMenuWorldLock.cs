@@ -7,32 +7,43 @@ using UnityEngine.UI;
 namespace ShipbreakerVr;
 
 /// <summary>
-/// Aggressively finds menu canvases and forces TRUE world-lock:
-/// - World Space render mode
-/// - Unparented from any camera
-/// - Position set once (or on recenter), NEVER copied from HMD each frame
+/// SAFE menu world-lock (0.4.5).
 ///
-/// Why 0.4.3 failed in practice: we only attached VrUi via CanvasScaler.OnEnable.
-/// Front-end/Doozy menus can stay Screen Space–Camera on the XR camera (inherently
-/// HMD-glued) if that hook misses or something resets renderMode. This scanner
-/// enforces lock continuously without re-following the head.
+/// 0.4.4 broke the VR view by converting nearly ALL root canvases to World Space and
+/// parking them in front of the HMD (fullscreen overlays blocked the camera).
+///
+/// This version is whitelist-only for menu-like canvases and never touches cameras,
+/// XR/HMD utility canvases, fades, or HUDs.
 /// </summary>
 public class VrMenuWorldLock : MonoBehaviour
 {
     private const float ForwardOffset = 1.8f;
     private const float HeightOffset = -0.1f;
-    private const float ScanInterval = 0.5f;
-    private const float StatusInterval = 1.0f;
+    private const float ScanInterval = 0.75f;
+    private const float StatusInterval = 2.0f;
 
-    private static readonly HashSet<string> SkipNameHints = new(System.StringComparer.OrdinalIgnoreCase)
+    /// <summary>Only canvases whose names match these are candidates.</summary>
+    private static readonly string[] MenuAllowHints =
     {
-        "reticule", "reticle", "crosshair", "fps", "console", "unityexplorer", "loader", "fade", "splash"
+        "MainMenu", "FrontEnd", "Pause", "FreePlay", "Free Mode", "Profile",
+        "LevelSelect", "Weekly", "Options", "Settings", "HabScreen", "Certificate",
+        "Inventory", "UIView", "Doozy"
+    };
+
+    /// <summary>Hard skip — never convert (protects camera / XR / overlays).</summary>
+    private static readonly string[] HardSkipHints =
+    {
+        "VrCamera", "XR", "OpenXR", "SteamVR", "reticule", "reticle", "crosshair",
+        "HUD", "Hud", "Marker", "fade", "Fade", "splash", "Splash", "loader", "Loader",
+        "FPS", "Console", "UnityExplorer", "Cursor", "Tooltip", "Toast", "Notify",
+        "Overlay", "Distortion", "Reboot", "Speech"
     };
 
     private float nextScan;
     private float nextStatus;
-    private int lastLockedCount;
     private readonly Dictionary<int, LockedCanvas> locked = new();
+    private int skippedProtected;
+    private int skippedNonMenu;
 
     private class LockedCanvas
     {
@@ -42,23 +53,19 @@ public class VrMenuWorldLock : MonoBehaviour
         public Quaternion AnchorRot;
         public bool Anchored;
         public string Name;
-        public int ModeResetCount;
     }
 
     private void OnEnable()
     {
         SceneManager.sceneLoaded += OnSceneLoaded;
-        ModLog.Info("[WorldLock] VrMenuWorldLock enabled — will scan for menu canvases.");
+        ModLog.Info("[WorldLock] SAFE mode (0.4.5): whitelist menus only — will not touch XR/HUD/fade canvases.");
     }
 
-    private void OnDisable()
-    {
-        SceneManager.sceneLoaded -= OnSceneLoaded;
-    }
+    private void OnDisable() => SceneManager.sceneLoaded -= OnSceneLoaded;
 
     private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
-        ModLog.Info($"[WorldLock] SceneLoaded '{scene.name}' — clearing anchors & rescan.");
+        ModLog.Info($"[WorldLock] SceneLoaded '{scene.name}' — clear menu anchors.");
         locked.Clear();
         nextScan = 0f;
     }
@@ -67,18 +74,13 @@ public class VrMenuWorldLock : MonoBehaviour
     {
         if (!ModXrManager.IsVrEnabled)
         {
-            if (locked.Count > 0)
-            {
-                ModLog.Info("[WorldLock] VR off — releasing tracked canvases.");
-                locked.Clear();
-            }
-
+            if (locked.Count > 0) locked.Clear();
             return;
         }
 
         if (Input.GetKeyDown(KeyCode.F4))
         {
-            ModLog.Info("[WorldLock] F4 — force recenter all locked menus.");
+            ModLog.Info("[WorldLock] F4 recenter (menus only).");
             RecenterAll();
         }
 
@@ -88,7 +90,7 @@ public class VrMenuWorldLock : MonoBehaviour
             ScanAndLock();
         }
 
-        EnforceLocksWithoutFollowingHmd();
+        EnforceMenuLocksOnly();
 
         if (Time.unscaledTime >= nextStatus)
         {
@@ -99,51 +101,58 @@ public class VrMenuWorldLock : MonoBehaviour
 
     private void ScanAndLock()
     {
-        var canvases = FindObjectsOfType<Canvas>();
-        var found = 0;
+        skippedProtected = 0;
+        skippedNonMenu = 0;
         var newly = 0;
 
-        foreach (var canvas in canvases)
+        foreach (var canvas in FindObjectsOfType<Canvas>())
         {
-            if (!canvas || !canvas.isRootCanvas) continue;
-            if (!canvas.isActiveAndEnabled) continue;
-            if (ShouldSkip(canvas)) continue;
+            if (!canvas || !canvas.isRootCanvas || !canvas.isActiveAndEnabled) continue;
 
-            found++;
-            var id = canvas.GetInstanceID();
-            if (!locked.TryGetValue(id, out var state))
+            if (IsProtected(canvas))
             {
-                state = new LockedCanvas
+                skippedProtected++;
+                continue;
+            }
+
+            if (!IsMenuCandidate(canvas))
+            {
+                skippedNonMenu++;
+                continue;
+            }
+
+            var id = canvas.GetInstanceID();
+            if (!locked.ContainsKey(id))
+            {
+                var state = new LockedCanvas
                 {
                     Canvas = canvas,
                     Transform = canvas.transform,
                     Name = Describe(canvas)
                 };
                 locked[id] = state;
+                ConvertAndAnchor(state, "scan-whitelist");
                 newly++;
-                ConvertAndAnchor(state, reason: "scan-new");
             }
             else
             {
-                state.Canvas = canvas;
-                state.Transform = canvas.transform;
+                locked[id].Canvas = canvas;
+                locked[id].Transform = canvas.transform;
             }
         }
 
-        // Drop destroyed
         var dead = new List<int>();
         foreach (var kv in locked)
             if (!kv.Value.Canvas) dead.Add(kv.Key);
         foreach (var id in dead) locked.Remove(id);
 
-        if (newly > 0 || found != lastLockedCount)
-        {
-            ModLog.Info($"[WorldLock][Menu] scan: activeRoots={found} tracked={locked.Count} newlyLocked={newly}");
-            lastLockedCount = found;
-        }
+        if (newly > 0)
+            ModLog.Info(
+                $"[WorldLock][Menu] newlyLocked={newly} tracked={locked.Count} " +
+                $"skippedProtected={skippedProtected} skippedNonMenu={skippedNonMenu}");
     }
 
-    private void EnforceLocksWithoutFollowingHmd()
+    private void EnforceMenuLocksOnly()
     {
         foreach (var kv in locked)
         {
@@ -151,82 +160,62 @@ public class VrMenuWorldLock : MonoBehaviour
             var canvas = state.Canvas;
             if (!canvas) continue;
 
-            // Kill HMD-glue modes without moving the anchor.
-            if (canvas.renderMode != RenderMode.WorldSpace)
+            // If somehow a protected canvas got in, drop it immediately.
+            if (IsProtected(canvas))
             {
-                state.ModeResetCount++;
-                ModLog.Warn(
-                    $"[WorldLock][Menu] '{state.Name}' renderMode was {canvas.renderMode} — forcing WorldSpace (reset#{state.ModeResetCount}).");
-                canvas.renderMode = RenderMode.WorldSpace;
+                ModLog.Warn($"[WorldLock] dropping protected canvas '{state.Name}' from tracker.");
+                continue;
             }
 
-            // If something re-parented under a camera, detach — but keep world pose.
-            if (state.Transform.parent != null)
+            if (canvas.renderMode != RenderMode.WorldSpace)
             {
-                var parentCam = state.Transform.GetComponentInParent<Camera>();
+                ModLog.Warn($"[WorldLock][Menu] '{state.Name}' mode reset to {canvas.renderMode} — re-locking.");
+                ConvertAndAnchor(state, "mode-reset");
+                continue;
+            }
+
+            // Only unparent if parent is a Camera (HMD glue). Don't yank arbitrary UI graphs.
+            var parentCam = state.Transform.GetComponentInParent<Camera>();
+            if (parentCam != null)
+            {
                 ModLog.Warn(
-                    $"[WorldLock][Menu] '{state.Name}' was parented under '{state.Transform.parent.name}' " +
-                    $"(cameraInParents={parentCam != null}) — unparenting (keep world pose).");
+                    $"[WorldLock][Menu] '{state.Name}' under camera '{parentCam.name}' — unparenting canvas only.");
                 var pos = state.Transform.position;
                 var rot = state.Transform.rotation;
                 state.Transform.SetParent(null, true);
-                state.Transform.position = pos;
-                state.Transform.rotation = rot;
+                state.Transform.SetPositionAndRotation(pos, rot);
             }
 
-            // Disable scalers that fight world-space.
-            var scaler = canvas.GetComponent<CanvasScaler>();
-            if (scaler && scaler.enabled) scaler.enabled = false;
-            var improver = canvas.GetComponent<BBI.Unity.Game.CanvasScalerImprover>();
-            if (improver && improver.enabled) improver.enabled = false;
-
-            // Ensure event camera set, but do NOT copy camera transform onto the canvas.
-            var cam = GetAnchorCamera();
-            if (cam) canvas.worldCamera = cam;
-
-            // If not yet anchored (or canvas just appeared), place once.
             if (!state.Anchored)
-                ConvertAndAnchor(state, reason: "enforce-first-anchor");
-            else
-            {
-                // Hard restore anchor if something moved it with the HMD this frame.
-                // Detect: canvas nearly matching camera pose in front of eyes.
-                if (cam && LooksGluedToHmd(state, cam))
-                {
-                    ModLog.Warn(
-                        $"[WorldLock][Menu] '{state.Name}' looked HMD-glued — restoring world anchor.");
-                    state.Transform.position = state.AnchorPos;
-                    state.Transform.rotation = state.AnchorRot;
-                }
-            }
+                ConvertAndAnchor(state, "enforce-anchor");
         }
-    }
-
-    private static bool LooksGluedToHmd(LockedCanvas state, Camera cam)
-    {
-        // If current pos is much closer to "in front of HMD now" than to our anchor, something re-glued it.
-        var hmdFront = cam.transform.position + cam.transform.forward * ForwardOffset;
-        var distToHmdFront = Vector3.Distance(state.Transform.position, hmdFront);
-        var distToAnchor = Vector3.Distance(state.Transform.position, state.AnchorPos);
-        return distToHmdFront < 0.35f && distToAnchor > 0.5f;
     }
 
     private void ConvertAndAnchor(LockedCanvas state, string reason)
     {
         var canvas = state.Canvas;
-        if (!canvas) return;
+        if (!canvas || IsProtected(canvas)) return;
 
-        var cam = GetAnchorCamera();
+        var cam = VrCamera.ActiveEyeCamera ? VrCamera.ActiveEyeCamera :
+            (VrCamera.MainCamera ? VrCamera.MainCamera : Camera.main);
         if (!cam)
         {
-            ModLog.Warn($"[WorldLock][Menu] cannot anchor '{state.Name}' yet — no camera ({reason}).");
+            ModLog.Warn($"[WorldLock][Menu] no camera to anchor '{state.Name}' ({reason}).");
+            return;
+        }
+
+        // Never disable or reparent the camera itself.
+        if (canvas.GetComponent<Camera>() != null)
+        {
+            ModLog.Warn($"[WorldLock] refusing canvas-on-camera '{state.Name}'.");
             return;
         }
 
         var t = state.Transform;
-        t.SetParent(null, true);
-        // Reasonable world-space scale for 1920-ish UI
-        if (t.localScale.x > 0.5f || t.localScale.x < 0.0001f)
+        if (t.GetComponentInParent<Camera>() != null)
+            t.SetParent(null, true);
+
+        if (t.localScale.x > 0.1f || t.localScale.x < 1e-5f)
             t.localScale = Vector3.one * 0.001f;
 
         canvas.renderMode = RenderMode.WorldSpace;
@@ -246,14 +235,12 @@ public class VrMenuWorldLock : MonoBehaviour
 
         state.AnchorPos = cam.transform.position + flatForward * ForwardOffset + Vector3.up * HeightOffset;
         state.AnchorRot = Quaternion.LookRotation(flatForward, Vector3.up);
-        t.position = state.AnchorPos;
-        t.rotation = state.AnchorRot;
+        t.SetPositionAndRotation(state.AnchorPos, state.AnchorRot);
         state.Anchored = true;
 
         ModLog.Info(
-            $"[WorldLock][Menu] LOCKED '{state.Name}' reason={reason} " +
-            $"pos={state.AnchorPos} rotY={state.AnchorRot.eulerAngles.y:F0} " +
-            $"scale={t.localScale} mode={canvas.renderMode} parent={(t.parent ? t.parent.name : "null")}");
+            $"[WorldLock][Menu] LOCKED '{state.Name}' reason={reason} pos={state.AnchorPos} " +
+            $"(camera '{cam.name}' untouched)");
     }
 
     private void RecenterAll()
@@ -261,7 +248,7 @@ public class VrMenuWorldLock : MonoBehaviour
         foreach (var kv in locked)
         {
             kv.Value.Anchored = false;
-            ConvertAndAnchor(kv.Value, reason: "F4-recenter");
+            ConvertAndAnchor(kv.Value, "F4");
         }
     }
 
@@ -269,39 +256,69 @@ public class VrMenuWorldLock : MonoBehaviour
 
     private void LogStatus()
     {
-        if (locked.Count == 0)
-        {
-            ModLog.Info("[WorldLock][Menu] status: no menu canvases tracked yet (VR on).");
-            return;
-        }
+        // Always remind that camera path is separate / protected.
+        ModLog.Info(
+            $"[WorldLock] status trackedMenus={locked.Count} " +
+            $"eyeCam={(VrCamera.ActiveEyeCamera ? VrCamera.ActiveEyeCamera.name : "null")} " +
+            $"bodyCam={(VrCamera.MainCamera ? VrCamera.MainCamera.name : "null")} " +
+            $"skippedProtected={skippedProtected} skippedNonMenu={skippedNonMenu}");
 
         var sb = new StringBuilder();
-        sb.Append($"[WorldLock][Menu] status: tracked={locked.Count}");
         var i = 0;
         foreach (var kv in locked)
         {
             var s = kv.Value;
             if (!s.Canvas) continue;
-            sb.Append($" | {s.Name} mode={s.Canvas.renderMode} parent={(s.Transform.parent ? s.Transform.parent.name : "null")} anchored={s.Anchored}");
-            if (++i >= 6) break;
+            sb.Append($" | {s.Name}");
+            if (++i >= 5) break;
         }
 
-        ModLog.Info(sb.ToString());
+        if (i > 0) ModLog.Info("[WorldLock][Menu] " + sb);
     }
 
-    private static Camera GetAnchorCamera()
+    private static bool IsProtected(Canvas canvas)
     {
-        // Prefer the *game* body camera (not the HMD-only child) for yaw placement,
-        // fall back to whatever Camera.main is.
-        if (VrCamera.MainCamera) return VrCamera.MainCamera;
-        return Camera.main;
+        if (!canvas) return true;
+
+        // Never touch a canvas on the same object as a Camera, or under VrCamera.
+        if (canvas.GetComponent<Camera>() != null) return true;
+        if (canvas.GetComponentInParent<VrCamera>() != null) return true;
+
+        var name = canvas.gameObject.name;
+        var path = Describe(canvas);
+        foreach (var hint in HardSkipHints)
+        {
+            if (name.IndexOf(hint, System.StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (path.IndexOf(hint, System.StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        }
+
+        // Fullscreen Screen Space Overlay without menu keywords — leave alone (0.4.4 broke these).
+        if (canvas.renderMode == RenderMode.ScreenSpaceOverlay && !NameLooksLikeMenu(name) &&
+            !NameLooksLikeMenu(path))
+            return true;
+
+        return false;
     }
 
-    private static bool ShouldSkip(Canvas canvas)
+    private static bool IsMenuCandidate(Canvas canvas)
     {
-        var n = canvas.gameObject.name;
-        foreach (var hint in SkipNameHints)
-            if (n.IndexOf(hint, System.StringComparison.OrdinalIgnoreCase) >= 0)
+        var name = canvas.gameObject.name;
+        var path = Describe(canvas);
+        if (NameLooksLikeMenu(name) || NameLooksLikeMenu(path)) return true;
+
+        // Doozy / selectable-heavy UI under FrontEnd-ish parents
+        if (canvas.GetComponentInChildren<Selectable>(true) != null &&
+            (path.IndexOf("UI", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
+             path.IndexOf("Menu", System.StringComparison.OrdinalIgnoreCase) >= 0))
+            return true;
+
+        return false;
+    }
+
+    private static bool NameLooksLikeMenu(string name)
+    {
+        foreach (var hint in MenuAllowHints)
+            if (name.IndexOf(hint, System.StringComparison.OrdinalIgnoreCase) >= 0)
                 return true;
         return false;
     }
@@ -310,16 +327,22 @@ public class VrMenuWorldLock : MonoBehaviour
     {
         var path = canvas.gameObject.name;
         var p = canvas.transform.parent;
-        if (p) path = p.name + "/" + path;
-        return $"{path}#{canvas.GetInstanceID()}";
+        var depth = 0;
+        while (p != null && depth < 4)
+        {
+            path = p.name + "/" + path;
+            p = p.parent;
+            depth++;
+        }
+
+        return path;
     }
 
     private static void EnsureCollider(Canvas canvas)
     {
         var rect = canvas.GetComponent<RectTransform>();
         if (!rect) return;
-        var col = canvas.GetComponent<BoxCollider>();
-        if (!col) col = canvas.gameObject.AddComponent<BoxCollider>();
+        var col = canvas.GetComponent<BoxCollider>() ?? canvas.gameObject.AddComponent<BoxCollider>();
         var size = rect.rect.size;
         col.size = new Vector3(Mathf.Max(Mathf.Abs(size.x), 100f), Mathf.Max(Mathf.Abs(size.y), 100f), 1f);
         col.center = new Vector3(rect.rect.center.x, rect.rect.center.y, 0f);

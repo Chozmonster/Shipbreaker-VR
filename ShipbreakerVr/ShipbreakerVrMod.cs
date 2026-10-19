@@ -1,33 +1,70 @@
-﻿using System.Collections.Generic;
-using System.Reflection;
+﻿using System;
+using System.Collections.Generic;
 using BepInEx;
 using HarmonyLib;
 using UnityEngine;
 
 namespace ShipbreakerVr;
 
-[BepInPlugin("ShipbreakerVr", "ShipbreakerVr", "0.4.4")]
+[BepInPlugin("ShipbreakerVr", "ShipbreakerVr", "0.4.5")]
 public class ShipbreakerVrMod : BaseUnityPlugin
 {
     private bool enableLights = true;
     private List<Light> lights;
+    private Harmony harmony;
 
     private void Awake()
     {
         ModLog.Init(Logger);
-        ModLog.Info($"======= ShipbreakerVr 0.4.4 starting (game {Application.version}) =======");
-        ModLog.Info("Expect log tags: [WorldLock] [UiPointer] [VrCamera] [XR]");
+        ModLog.Info($"======= ShipbreakerVr 0.4.5 starting (game {Application.version}) =======");
+        ModLog.Info("Camera path is independent of menu patches. Tags: [XR] [VrCamera] [WorldLock] [UiPointer]");
 
-        Harmony.CreateAndPatchAll(Assembly.GetExecutingAssembly());
-        ModLog.Info("Harmony patches applied.");
+        harmony = new Harmony("ShipbreakerVr");
 
-        var xr = gameObject.AddComponent<ModXrManager>();
-        xr.InitConfig(Config);
+        // 1) Camera FIRST — must succeed even if menu patching fails.
+        try
+        {
+            CameraPatches.Apply(harmony);
+        }
+        catch (Exception e)
+        {
+            ModLog.Error("[VrCamera] FAILED to apply camera Harmony patch: " + e);
+        }
 
-        gameObject.AddComponent<VrMenuWorldLock>();
-        gameObject.AddComponent<VrUiLaser>();
+        // 2) Menu patches — isolated; failure must not block XR components.
+        try
+        {
+            MenuPatches.Apply(harmony);
+        }
+        catch (Exception e)
+        {
+            ModLog.Warn("[WorldLock] menu Harmony patch failed (XR/camera still proceed): " + e.Message);
+        }
 
-        ModLog.Info("Components: ModXrManager, VrMenuWorldLock, VrUiLaser.");
+        // 3) Always create runtime components (0.4.4 never reached here when Harmony aborted).
+        try
+        {
+            var xr = gameObject.AddComponent<ModXrManager>();
+            xr.InitConfig(Config);
+            ModLog.Info("[XR] ModXrManager component added.");
+        }
+        catch (Exception e)
+        {
+            ModLog.Error("[XR] Failed to add ModXrManager: " + e);
+        }
+
+        try
+        {
+            gameObject.AddComponent<VrMenuWorldLock>();
+            gameObject.AddComponent<VrUiLaser>();
+            ModLog.Info("[WorldLock][UiPointer] VrMenuWorldLock + VrUiLaser added (safe whitelist).");
+        }
+        catch (Exception e)
+        {
+            ModLog.Warn("Menu components failed to add: " + e.Message);
+        }
+
+        ModLog.Info("======= ShipbreakerVr 0.4.5 Awake complete =======");
     }
 
     private void Update()
