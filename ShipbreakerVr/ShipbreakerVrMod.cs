@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace ShipbreakerVr;
 
-[BepInPlugin("ShipbreakerVr", "ShipbreakerVr", "0.4.0")]
+[BepInPlugin("ShipbreakerVr", "ShipbreakerVr", "0.4.1")]
 public class ShipbreakerVrMod : BaseUnityPlugin
 {
     private bool enableLights = true;
