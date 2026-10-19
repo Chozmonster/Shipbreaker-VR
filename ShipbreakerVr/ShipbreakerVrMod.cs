@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace ShipbreakerVr;
 
-[BepInPlugin("ShipbreakerVr", "ShipbreakerVr", "0.4.6")]
+[BepInPlugin("ShipbreakerVr", "ShipbreakerVr", "0.4.7")]
 public class ShipbreakerVrMod : BaseUnityPlugin
 {
     private bool enableLights = true;
@@ -16,8 +16,10 @@ public class ShipbreakerVrMod : BaseUnityPlugin
     private void Awake()
     {
         ModLog.Init(Logger);
-        ModLog.Info($"======= ShipbreakerVr 0.4.6 starting (game {Application.version}) =======");
-        ModLog.Info("Camera path independent of menus. Menus use XR head pose when eyeCam null. Tags: [XR] [VrCamera] [WorldLock] [UiPointer]");
+        ModLog.Info($"======= ShipbreakerVr 0.4.7 starting (game {Application.version}) =======");
+        ModLog.Info(
+            $"Camera independent. Menus TargetDistance={MenuWorldPlacement.TargetDistance}m. " +
+            "Laser=XRNode hand world pose. Tags: [XR] [VrCamera] [WorldLock] [UiPointer]");
 
         harmony = new Harmony("ShipbreakerVr");
 
@@ -57,14 +59,14 @@ public class ShipbreakerVrMod : BaseUnityPlugin
         {
             gameObject.AddComponent<VrMenuWorldLock>();
             gameObject.AddComponent<VrUiLaser>();
-            ModLog.Info("[WorldLock][UiPointer] VrMenuWorldLock + VrUiLaser added (0.4.6 XR-head placement).");
+            ModLog.Info("[WorldLock][UiPointer] VrMenuWorldLock + VrUiLaser added (0.4.7 closer menus + hand-space laser).");
         }
         catch (Exception e)
         {
             ModLog.Warn("Menu components failed to add: " + e.Message);
         }
 
-        ModLog.Info("======= ShipbreakerVr 0.4.6 Awake complete =======");
+        ModLog.Info("======= ShipbreakerVr 0.4.7 Awake complete =======");
     }
 
     private void Update()

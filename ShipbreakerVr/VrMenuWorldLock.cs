@@ -61,8 +61,8 @@ public class VrMenuWorldLock : MonoBehaviour
     {
         SceneManager.sceneLoaded += OnSceneLoaded;
         ModLog.Info(
-            "[WorldLock] 0.4.6: XR head / Lynx pose → world plane " +
-            $"~{MenuWorldPlacement.TargetDistance:0.0}m + comfort scale. F4 recenter. Camera untouched.");
+            "[WorldLock] 0.4.7: XR head / Lynx pose → world plane " +
+            $"~{MenuWorldPlacement.TargetDistance:0.0}m (TargetDistance) + comfort scale. F4 recenter. Camera untouched.");
     }
 
     private void OnDisable() => SceneManager.sceneLoaded -= OnSceneLoaded;

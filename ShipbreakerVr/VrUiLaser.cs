@@ -8,7 +8,8 @@ using UnityEngine.XR;
 namespace ShipbreakerVr;
 
 /// <summary>
-/// Controller → UI pointer. XRNode first. Gaze is failure mode (logged), not success.
+/// Controller → UI pointer. XRNode hand world pose only (same space as SteamVR hands).
+/// Aim tip = grip + few cm forward — never meters. Gaze is failure mode, not success.
 /// </summary>
 public class VrUiLaser : MonoBehaviour
 {
@@ -16,6 +17,7 @@ public class VrUiLaser : MonoBehaviour
     private const float StatusInterval = 1f;
 
     private LineRenderer line;
+    private Transform lineTransform;
     private Camera eventCamera;
     private GameObject currentHover;
     private bool clickHeld;
@@ -23,7 +25,9 @@ public class VrUiLaser : MonoBehaviour
     private PointerSource lastSource = PointerSource.None;
     private string lastDeviceName = "(none)";
     private Vector3 lastOrigin;
+    private Vector3 lastGrip;
     private Vector3 lastDir;
+    private string lastPoseSpace = "(none)";
     private VrVirtualMouseInput virtualMouse;
     private bool menuLikelyOpen;
     private int gazeFallbackLogs;
@@ -40,11 +44,14 @@ public class VrUiLaser : MonoBehaviour
     private void Start()
     {
         var go = new GameObject("ShipbreakerVr_UiLaser");
-        DontDestroyOnLoad(go);
+        Object.DontDestroyOnLoad(go);
+        go.transform.SetPositionAndRotation(Vector3.zero, Quaternion.identity);
+        go.transform.localScale = Vector3.one;
+        lineTransform = go.transform;
         line = go.AddComponent<LineRenderer>();
         line.positionCount = 2;
-        line.startWidth = 0.007f;
-        line.endWidth = 0.002f;
+        line.startWidth = 0.006f;
+        line.endWidth = 0.0015f;
         var shader = Shader.Find("Sprites/Default") ?? Shader.Find("Unlit/Color") ?? Shader.Find("UI/Default");
         if (shader != null)
             line.material = new Material(shader) { color = new Color(0.2f, 0.9f, 1f, 1f) };
@@ -56,7 +63,9 @@ public class VrUiLaser : MonoBehaviour
         line.sortingOrder = 9000;
 
         EnsureVirtualMouse();
-        ModLog.Info("[UiPointer] laser ready — expect source=XrNodeRight/Left when hands tracked (gaze ≠ success).");
+        ModLog.Info(
+            "[UiPointer] laser ready — XRNode hand world pose + " +
+            $"{XrTracking.AimTipOffsetMeters * 100f:0}cm tip (no camera rebase / no meter offset).");
     }
 
     private void EnsureVirtualMouse()
@@ -128,6 +137,13 @@ public class VrUiLaser : MonoBehaviour
                     "Hands should yield source=XrNodeRight/Left.");
         }
 
+        // Keep line object at identity so useWorldSpace positions are not skewed.
+        if (lineTransform)
+        {
+            lineTransform.SetPositionAndRotation(Vector3.zero, Quaternion.identity);
+            lineTransform.localScale = Vector3.one;
+        }
+
         line.enabled = true;
         line.SetPosition(0, origin);
         line.SetPosition(1, origin + direction * MaxDistance);
@@ -172,30 +188,26 @@ public class VrUiLaser : MonoBehaviour
     {
         var sb = new StringBuilder();
         sb.Append("[UiPointer] ");
-        sb.Append($"source={lastSource} device='{lastDeviceName}' ");
-        sb.Append($"origin={lastOrigin} dir={lastDir} ");
+        sb.Append($"source={lastSource} device='{lastDeviceName}' space={lastPoseSpace} ");
+        sb.Append($"origin={lastOrigin} grip={lastGrip} dir={lastDir} ");
+        var gripDelta = Vector3.Distance(lastOrigin, lastGrip);
+        sb.Append($"originGripDelta={gripDelta:0.000}m ");
         sb.Append($"menuOpen={menuLikelyOpen} hitUi={hitUi} dist={distance:0.00} ");
         sb.Append($"trigger={trigger} ");
         sb.Append($"hover={(hover ? hover.name : "none")} ");
         sb.Append($"selectable={(string.IsNullOrEmpty(selectableName) ? "none" : selectableName)} ");
         sb.Append($"virtualMouse={(virtualMouse != null && virtualMouse.Active)} ");
-        sb.Append(
-            $"eventCam={(eventCamera ? eventCamera.name : "null")} ");
 
-        var nodes = new List<XRNodeState>();
-        InputTracking.GetNodeStates(nodes);
-        sb.Append("nodes=");
-        foreach (var n in nodes)
-        {
-            if (n.nodeType is XRNode.RightHand or XRNode.LeftHand or XRNode.Head)
-            {
-                n.TryGetPosition(out var p);
-                sb.Append($"[{n.nodeType} tracked={n.tracked} pos={p}]");
-            }
-        }
+        // Raw XRNode hand (tracking) — when space=cam-rebase, origin may differ from raw by design.
+        if (XrTracking.TryGetNodePose(XRNode.RightHand, out var rh, out _))
+            sb.Append($"handRightRaw={rh} ");
+        if (XrTracking.TryGetNodePose(XRNode.LeftHand, out var lh, out _))
+            sb.Append($"handLeftRaw={lh} ");
 
         if (lastSource == PointerSource.Gaze)
             ModLog.Warn(sb.ToString());
+        else if (gripDelta > 0.25f)
+            ModLog.Warn(sb + " (origin far from grip — unexpected)");
         else
             ModLog.Info(sb.ToString());
     }
@@ -218,31 +230,28 @@ public class VrUiLaser : MonoBehaviour
         direction = Vector3.forward;
         source = PointerSource.None;
         deviceName = "(none)";
+        lastGrip = default;
 
-        if (TryGetXrNodeRay(XRNode.RightHand, out origin, out direction))
+        // XRNode hand pose; cam-rebase only when render cam diverges from XR head ( steams VR visuals).
+        if (XrTracking.TryGetHandAim(XRNode.RightHand, out origin, out direction, out lastGrip, out lastPoseSpace))
         {
             source = PointerSource.XrNodeRight;
             deviceName = "XRNode.RightHand";
             return true;
         }
 
-        if (TryGetXrNodeRay(XRNode.LeftHand, out origin, out direction))
+        if (XrTracking.TryGetHandAim(XRNode.LeftHand, out origin, out direction, out lastGrip, out lastPoseSpace))
         {
             source = PointerSource.XrNodeLeft;
             deviceName = "XRNode.LeftHand";
             return true;
         }
 
-        if (TryGetInputDeviceRay(out origin, out direction, out deviceName))
-        {
-            source = PointerSource.InputDevice;
-            return true;
-        }
-
-        // Gaze = last resort only
+        // Gaze = last resort only (not a success path)
         if (MenuWorldPlacement.TryGetPlayerView(out var view))
         {
             origin = view.Position;
+            lastGrip = origin;
             direction = (view.Rotation * Vector3.forward).normalized;
             source = PointerSource.Gaze;
             deviceName = "Gaze/" + view.Source;
@@ -252,6 +261,7 @@ public class VrUiLaser : MonoBehaviour
         if (eventCamera)
         {
             origin = eventCamera.transform.position;
+            lastGrip = origin;
             direction = eventCamera.transform.forward;
             source = PointerSource.Gaze;
             deviceName = "Gaze/HMD";
@@ -259,68 +269,6 @@ public class VrUiLaser : MonoBehaviour
         }
 
         return false;
-    }
-
-    private static bool TryGetXrNodeRay(XRNode node, out Vector3 origin, out Vector3 direction)
-    {
-        origin = default;
-        direction = Vector3.forward;
-        var nodes = new List<XRNodeState>();
-        InputTracking.GetNodeStates(nodes);
-        foreach (var n in nodes)
-        {
-            if (n.nodeType != node) continue;
-            if (!n.tracked) continue;
-            if (!n.TryGetPosition(out origin)) continue;
-            if (!n.TryGetRotation(out var rot)) continue;
-            direction = (rot * Vector3.forward).normalized;
-            return direction.sqrMagnitude > 1e-6f;
-        }
-
-        return false;
-    }
-
-    private static bool TryGetInputDeviceRay(out Vector3 origin, out Vector3 direction, out string deviceName)
-    {
-        origin = default;
-        direction = Vector3.forward;
-        deviceName = "(none)";
-
-        var devices = new List<InputDevice>();
-        InputDevices.GetDevices(devices);
-        devices.Sort((a, b) => Score(b).CompareTo(Score(a)));
-
-        foreach (var d in devices)
-        {
-            if (!d.isValid) continue;
-            var chars = d.characteristics;
-            if ((chars & InputDeviceCharacteristics.HeadMounted) != 0) continue;
-            if ((chars & InputDeviceCharacteristics.Controller) == 0 &&
-                (chars & InputDeviceCharacteristics.HeldInHand) == 0)
-                continue;
-
-            if (!d.TryGetFeatureValue(CommonUsages.devicePosition, out var pos)) continue;
-            if (!d.TryGetFeatureValue(CommonUsages.deviceRotation, out var rot)) continue;
-            if (!d.TryGetFeatureValue(CommonUsages.isTracked, out var tracked)) tracked = true;
-            if (!tracked) continue;
-
-            origin = pos;
-            direction = (rot * Vector3.forward).normalized;
-            deviceName = $"{d.name}|{chars}";
-            return true;
-        }
-
-        return false;
-
-        static int Score(InputDevice d)
-        {
-            var c = d.characteristics;
-            var s = 0;
-            if ((c & InputDeviceCharacteristics.Right) != 0) s += 10;
-            if ((c & InputDeviceCharacteristics.Controller) != 0) s += 5;
-            if ((c & InputDeviceCharacteristics.HeldInHand) != 0) s += 3;
-            return s;
-        }
     }
 
     private bool RaycastUi(Vector3 origin, Vector3 direction, out float distance, out GameObject hitObject,

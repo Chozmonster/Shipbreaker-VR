@@ -8,13 +8,18 @@ namespace ShipbreakerVr;
 /// <summary>
 /// Comfortable world-plane placement for menus.
 /// Prefer XR HMD pose (FrontEnd often has eyeCam/bodyCam null — LynxCamera not started yet).
-/// Target: ~2m ahead, ~1.55m panel width, never camera-near / world-origin glue.
+/// Target: ~1.3m ahead (Jay: 1.2–1.5m), panel scaled to stay fully visible.
 /// </summary>
 public static class MenuWorldPlacement
 {
-    public const float TargetDistance = 2.0f;
-    public const float HeightOffset = -0.15f;
-    public const float TargetWidthMeters = 1.55f;
+    /// <summary>Meters ahead of player yaw-forward. F4 recenters to this distance.</summary>
+    public const float TargetDistance = 1.3f;
+
+    public const float HeightOffset = -0.12f;
+
+    /// <summary>World-space panel width at TargetDistance — full UI readable, not tiny.</summary>
+    public const float TargetWidthMeters = 1.2f;
+
     public const float MinScale = 0.00035f;
     public const float MaxScale = 0.0035f;
 
@@ -27,24 +32,17 @@ public static class MenuWorldPlacement
     }
 
     /// <summary>
-    /// Resolve where the player is looking. Never silently use a dead/origin camera when XR head is available.
+    /// Resolve where the player is looking.
+    /// FrontEnd: XRNode.Head (cameras often still at origin).
+    /// After VrCamera: prefer the render camera so menus share space with the HMD view.
     /// </summary>
     public static bool TryGetPlayerView(out PlayerView view)
     {
         view = default;
+        var hasHead = TryGetXrHead(out var headPos, out var headRot);
 
-        // 1) XR HMD node — correct during FrontEnd before LynxCameraController.Start.
-        if (TryGetXrHead(out var headPos, out var headRot))
-        {
-            view.Position = headPos;
-            view.Rotation = headRot;
-            view.Source = "XRNode.Head";
-            view.Camera = ResolveAnyCamera();
-            return true;
-        }
-
-        // 2) VrCamera eye / body (after gameplay hook).
-        if (VrCamera.ActiveEyeCamera)
+        // 1) VrCamera eye/body when hooked and not stuck at origin — aligns with what HMD shows.
+        if (VrCamera.ActiveEyeCamera && VrCamera.ActiveEyeCamera.transform.position.sqrMagnitude > 0.01f)
         {
             var c = VrCamera.ActiveEyeCamera;
             view.Position = c.transform.position;
@@ -54,7 +52,7 @@ public static class MenuWorldPlacement
             return true;
         }
 
-        if (VrCamera.MainCamera)
+        if (VrCamera.MainCamera && VrCamera.MainCamera.transform.position.sqrMagnitude > 0.01f)
         {
             var c = VrCamera.MainCamera;
             view.Position = c.transform.position;
@@ -64,12 +62,22 @@ public static class MenuWorldPlacement
             return true;
         }
 
+        // 2) XR HMD — correct during FrontEnd before LynxCameraController.Start.
+        if (hasHead)
+        {
+            view.Position = headPos;
+            view.Rotation = headRot;
+            view.Source = "XRNode.Head";
+            view.Camera = ResolveAnyCamera();
+            return true;
+        }
+
         // 3) LynxCameraController if present but VrCamera not hooked yet.
         var lynx = Object.FindObjectOfType<LynxCameraController>();
         if (lynx)
         {
             var c = lynx.GetComponent<Camera>();
-            if (c)
+            if (c && c.transform.position.sqrMagnitude > 0.01f)
             {
                 view.Position = c.transform.position;
                 view.Rotation = c.transform.rotation;
@@ -79,12 +87,11 @@ public static class MenuWorldPlacement
             }
         }
 
-        // 4) Camera.main / any enabled camera — last resort; reject near-zero if XR devices exist.
+        // 4) Camera.main — reject origin while XR up (0.4.5 bug).
         var cam = ResolveAnyCamera();
         if (cam)
         {
             var p = cam.transform.position;
-            // If camera sits at origin and XR is up, wait for head — avoid (0,-0.2,-2.3) menus.
             if (p.sqrMagnitude < 0.01f && XrLikelyActive())
             {
                 view.Source = "defer:Camera.atOriginWhileXrUp/" + cam.name;
@@ -176,18 +183,8 @@ public static class MenuWorldPlacement
 
     private static bool TryGetXrHead(out Vector3 pos, out Quaternion rot)
     {
-        pos = default;
-        rot = Quaternion.identity;
-        var nodes = new List<XRNodeState>();
-        InputTracking.GetNodeStates(nodes);
-        foreach (var n in nodes)
-        {
-            if (n.nodeType != XRNode.Head) continue;
-            if (!n.tracked) continue;
-            if (!n.TryGetPosition(out pos)) continue;
-            if (!n.TryGetRotation(out rot)) continue;
+        if (XrTracking.TryGetNodePose(XRNode.Head, out pos, out rot))
             return true;
-        }
 
         // InputDevices HMD fallback
         var devices = new List<InputDevice>();
@@ -201,6 +198,8 @@ public static class MenuWorldPlacement
             return true;
         }
 
+        pos = default;
+        rot = Quaternion.identity;
         return false;
     }
 
